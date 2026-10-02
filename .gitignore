@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
+
+# 运行时产物
+app.log
+*.log
+
+# 本地配置与数据（含密钥 / 用户小说，不入库）
+config.json
+workspace/
+
+# 本地 embedding 模型
+models/
+corpus_txt/
+_*
+tests/*
+scripts/*
