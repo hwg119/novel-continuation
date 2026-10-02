@@ -23,7 +23,7 @@ python web_main.py
 ## Web 页面与流程
 
 - **首页**：汇总工程状态、最近章节、Wiki 待办和运行记录，并提供下一章续写入口。
-- **小说正文**：按章节浏览、阅读和编辑正文，查看插图与摘要，搜索全书内容，比较修订稿并导出 Word。
+- **小说正文**：按章节浏览、阅读和编辑正文，查看插图与摘要，搜索全书内容，生成分级英语学习版，比较修订稿并导出 Word。
 - **续写与分幕**：维护全书规则、当前章规划和分幕大纲；支持模型提取、按问题修改以及续写生成。
 - **审校与修订**：使用模型检查人物、设定和时间线一致性，并生成可比较、可编辑、可回看的整章修订建议。
 - **小说 Wiki**：从原文增量整理人物、事物、经历、状态和关系证据，为续写与审校提供可追溯参考。
@@ -50,6 +50,7 @@ workspace/
     chapters/chapter_N.txt         母本与续写章节
     vectorstore/                   FAISS 向量索引及 SQLite 元数据
     wiki/chapters/chapter_N.json   按章提取的 Wiki 事实与正文哈希
+    learning_editions/             与正文隔离的分级英语学习版
     illustrations/chapter_N.svg    已生成的本章插图（可选）
     exports/chapter_N.docx         Word 导出文件
     runs/web_jobs/                 Web 后台任务状态和日志

@@ -632,6 +632,73 @@ def register_features(app: FastAPI, workspace_root: str,
 
         return jobs.start(path, "summary", work)
 
+    @app.get("/api/projects/{project_id}/chapters/{number}/learning/{level}")
+    def get_learning_edition(project_id: str, number: int, level: str):
+        from core.learning_edition import read_learning_edition
+        path, chapter_file = existing_chapter(project_id, number)
+        try:
+            return read_learning_edition(
+                path, number, level, chapter_file.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/projects/{project_id}/chapters/{number}/learning/{level}",
+              dependencies=[Depends(_write_required)])
+    def create_learning_edition(project_id: str, number: int, level: str, payload: dict):
+        from core.continuation import ContinuationLLM
+        from core.learning_edition import LEVELS, generate_learning_edition
+        if level not in LEVELS:
+            raise HTTPException(400, "英语学习级别无效")
+        path, chapter_file = existing_chapter(project_id, number)
+        model_cfg = llm(str(payload.get("model_name") or ""))
+
+        def work(update):
+            update(f"正在生成第 {number} 章{LEVELS[level]['label']}英语学习版",
+                   {"chapter": number, "level": level,
+                    "model": model_cfg.get("model_name", "")})
+            return generate_learning_edition(
+                path, number, chapter_file.read_text(encoding="utf-8"), level,
+                ContinuationLLM(model_cfg), progress=update)
+
+        return jobs.start(path, "learning", work)
+
+    @app.post("/api/projects/{project_id}/chapters/{number}/learning/{level}/export",
+              dependencies=[Depends(_write_required)])
+    def export_learning_word(project_id: str, number: int, level: str, payload: dict):
+        from core.chapter_export import export_learning_docx
+        from core.chapter_illustration import illustration_path
+        from core.learning_edition import LEVELS, read_learning_edition
+        if level not in LEVELS:
+            raise HTTPException(400, "英语学习级别无效")
+        mode = str(payload.get("mode") or "inline")
+        if mode not in ("inline", "endnotes", "exercise"):
+            raise HTTPException(400, "学习版 Word 模式无效")
+        path, chapter_file = existing_chapter(project_id, number)
+        text = chapter_file.read_text(encoding="utf-8")
+        edition = read_learning_edition(path, number, level, text)
+        if not edition.get("valid"):
+            raise HTTPException(400, "请先生成与当前正文一致的英语学习版")
+        title = text.partition("\n")[0]
+        image = illustration_path(path, number)
+        svg = (image.read_text(encoding="utf-8")
+               if bool(payload.get("include_illustration", True)) and image.is_file() else None)
+        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{mode}.docx"
+        return export_learning_docx(
+            title, edition, str(target), chapter_number=number, mode=mode,
+            include_vocabulary=bool(payload.get("include_vocabulary", True)),
+            illustration_svg=svg)
+
+    @app.get("/api/projects/{project_id}/chapters/{number}/learning/{level}/export/{mode}")
+    def download_learning_word(project_id: str, number: int, level: str, mode: str):
+        from core.learning_edition import LEVELS
+        if level not in LEVELS or mode not in ("inline", "endnotes", "exercise"):
+            raise HTTPException(404, "英语学习版 Word 不存在")
+        path = project_path(project_id)
+        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{mode}.docx"
+        if not target.is_file():
+            raise HTTPException(404, "请先生成英语学习版 Word")
+        return FileResponse(target, filename=target.name)
+
     @app.post("/api/projects/{project_id}/revise", dependencies=[Depends(_write_required)])
     def revise(project_id: str, payload: ChapterRequest):
         from core.chapter_revision import (build_whole_chapter_prompt,

@@ -13,6 +13,7 @@ import RevisionPanel from './RevisionPanel.vue'
 import TaskDrawer from './TaskDrawer.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import MessageToast from './MessageToast.vue'
+import LearningReader from './LearningReader.vue'
 import { acceptConfirm, askConfirm, cancelConfirm, confirmState } from './confirmService'
 import { parseRoute, routePath } from './routeState'
 import { closeToast, toast, toastState } from './toastService'
@@ -58,6 +59,7 @@ const baseline = ref('')
 const revision = ref('')
 const chapterSummary = ref<ChapterSummary | null>(null)
 const chapterIllustration = ref('')
+const readingMode = ref<'original' | 'learning'>('original')
 const illustrationLoading = ref(false)
 const summaryBusy = ref(false)
 const settingsChapter = ref<number | null>(null)
@@ -442,7 +444,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
     <aside class="reading-index" aria-label="本书章节目录"><div class="reading-index-head"><strong>章节目录</strong><span>{{ chapters.length }} 章</span></div>
       <nav class="reading-chapters" aria-label="小说章节"><button v-for="item in [...chapters].reverse()" :key="item.number" type="button"
         class="reading-chapter" :class="{ active: item.number === chapterNumber }" :aria-current="item.number === chapterNumber ? 'page' : undefined"
-        @click="chooseChapter(item.number)"><span class="chapter-index">{{ String(item.number).padStart(3, '0') }}</span><span>第 {{ item.number }} 章</span></button>
+        @click="chooseChapter(item.number)"><span>第 {{ item.number }} 章</span></button>
         <p v-if="!chapters.length" class="reading-empty">暂无章节。请先导入母本，或生成新章。</p></nav></aside>
     <div class="editor-wrap">
     <section class="story-search" :class="{ expanded: searchDone || searchBusy }" aria-labelledby="story-search-title">
@@ -464,11 +466,12 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
           </article></div><p v-if="!searchResults.length" class="story-search-state">没有找到相关片段。换一种叙述方式，或检查向量库是否覆盖了目标章节。</p></template>
       </div>
     </section>
-    <template v-if="chapterNumber !== null"><div class="editor-meta"><span>第 {{ chapterNumber }} 章</span><span>{{ wordCount.toLocaleString('zh-CN') }} 字 · Ctrl+S 保存</span></div>
+    <template v-if="chapterNumber !== null"><div class="editor-meta"><span>第 {{ chapterNumber }} 章</span><span>{{ readingMode === 'original' ? `${wordCount.toLocaleString('zh-CN')} 字 · Ctrl+S 保存` : '分级双语阅读' }}</span></div>
+      <div class="reading-mode-switch" role="tablist" aria-label="正文阅读模式"><button role="tab" :aria-selected="readingMode === 'original'" :class="{ active: readingMode === 'original' }" @click="readingMode = 'original'">原文与编辑</button><button role="tab" :aria-selected="readingMode === 'learning'" :class="{ active: readingMode === 'learning' }" @click="readingMode = 'learning'">英语学习版</button></div>
       <h1>{{ title }}</h1>
       <figure v-if="chapterIllustrationUrl" class="chapter-front-illustration"><img :src="chapterIllustrationUrl" :alt="`第 ${chapterNumber} 章插图`"><figcaption>本章插图</figcaption></figure>
       <div v-else-if="illustrationLoading" class="chapter-front-illustration loading" aria-live="polite">正在载入本章插图…</div>
-      <div class="manuscript"><div class="manuscript-rule" aria-hidden="true"></div><textarea ref="manuscriptEditor" v-model="text" spellcheck="false" aria-label="章节全文"></textarea></div>
+      <template v-if="readingMode === 'original'"><div class="manuscript"><div class="manuscript-rule" aria-hidden="true"></div><textarea ref="manuscriptEditor" v-model="text" spellcheck="false" aria-label="章节全文"></textarea></div>
       <div class="editor-actions"><button class="subtle" :disabled="dirty" @click="exportWord">导出 Word</button>
         <button class="subtle" @click="activeTab = 'revision'">查看修订稿／高亮对照</button>
         <button class="subtle" @click="activeTab = 'quality'">整章修订／审校</button></div>
@@ -479,7 +482,8 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
         <p v-else class="chapter-summary-empty">当前章节还没有摘要。生成下一章分幕前建议先生成。</p>
         <ul v-if="chapterSummary?.issues?.length" class="summary-issues"><li v-for="issue in chapterSummary.issues" :key="issue">{{ issue }}</li></ul>
         <div class="chapter-summary-actions"><small>生成第 {{ (chapterNumber || 0) + 1 }} 章分幕时会优先使用这里的内容。</small><button type="button" :disabled="summaryBusy || dirty || !modelName" @click="regenerateSummary"><span v-if="summaryBusy" class="button-spinner" aria-hidden="true"></span>{{ summaryBusy ? '生成中…' : chapterSummary?.exists ? '重新生成摘要' : '生成摘要' }}</button></div>
-      </section>
+      </section></template>
+      <LearningReader v-else :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName" :dirty="dirty" :source-revision="revision" @task="taskStarted" />
     </template><div v-else class="welcome"><span>写作从这里继续</span><h1>选一章，接着写。</h1><p>可以导入母本，也可以先在续写设定中规划新章。</p></div>
     </div></div></template>
   <RevisionPanel v-else-if="activeTab === 'revision' && chapterNumber !== null" :project-id="projectId" :chapter-number="chapterNumber" :current-text="text" @back="activeTab = 'write'" />

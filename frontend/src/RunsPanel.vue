@@ -22,6 +22,7 @@ const jobTitles: Record<string, string> = {
   plan: '章节规划', plan_revision: '按问题修订分幕',
   book_rules: '全书规则提取', model_test: '模型连接测试',
   illustration: '生成章节插图',
+  learning: '生成英语学习版',
 }
 const eventTitles: Record<string, string> = {
   run_started: '开始续写', summary_filled: '补齐前章摘要', retrieval_completed: '完成母本检索',
