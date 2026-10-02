@@ -966,8 +966,23 @@ def register_features(app: FastAPI, workspace_root: str,
         from core.continuation import ContinuationLLM
         from core.wiki_run_log import WikiRunLogger
         path = project_path(project_id)
-        if not wiki_pending_chapters(path):
-            raise HTTPException(400, "Wiki 已是最新，无待处理章节")
+        start_raw = payload.get("start")
+        end_raw = payload.get("end")
+        start = int(start_raw) if start_raw is not None else None
+        end = int(end_raw) if end_raw is not None else None
+        force = bool(payload.get("force"))
+        if start is not None and start < 1:
+            raise HTTPException(400, "起始章必须大于零")
+        if end is not None and end < 1:
+            raise HTTPException(400, "结束章必须大于零")
+        if start is not None and end is not None and end < start:
+            raise HTTPException(400, "章号范围无效")
+        pending = [item for item in wiki_pending_chapters(path)
+                   if (start is None or item["chapter"] >= start)
+                   and (end is None or item["chapter"] <= end)]
+        if not force and not pending:
+            message = "所选范围内没有待处理章节" if start is not None or end is not None else "Wiki 已是最新，无待处理章节"
+            raise HTTPException(400, message)
         model_cfg = llm(str(payload.get("model_name") or ""))
         def work(update, job_id):
             audit = WikiRunLogger(path, job_id, model_cfg.get("model_name", ""),
@@ -975,7 +990,8 @@ def register_features(app: FastAPI, workspace_root: str,
             update("已创建完整 Wiki 日志", {"log_path": str(audit.path)})
             try:
                 result = build_pending_wiki(path, ContinuationLLM(model_cfg),
-                                            progress=lambda message, data=None: update(message, data), audit=audit)
+                                            progress=lambda message, data=None: update(message, data), audit=audit,
+                                            start=start, end=end, force=force)
                 audit.write("run_completed", **result)
                 return {**result, "log_path": str(audit.path)}
             except Exception as exc:

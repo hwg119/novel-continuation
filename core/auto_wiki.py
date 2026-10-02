@@ -500,8 +500,25 @@ def wiki_pending_chapters(project_dir: str) -> list[dict]:
     return pending
 
 
-def build_pending_wiki(project_dir: str, llm, progress=None, audit=None) -> dict:
-    pending = wiki_pending_chapters(project_dir)
+def build_pending_wiki(project_dir: str, llm, progress=None, audit=None,
+                       start: int | None = None, end: int | None = None,
+                       force: bool = False) -> dict:
+    """更新待处理章节；可限制范围，或显式强制重建范围内全部章节。"""
+    if force:
+        pending = [
+            {"chapter": number, "reason": "force"}
+            for number, _, source in list_chapter_files(project_dir)
+            if (start is None or number >= start) and (end is None or number <= end)
+            and read_file(source).strip()
+        ]
+    else:
+        pending = [
+            item for item in wiki_pending_chapters(project_dir)
+            if (start is None or item["chapter"] >= start)
+            and (end is None or item["chapter"] <= end)
+        ]
+    if force and not pending:
+        raise ValueError("范围内没有可编纂的章节")
     count = 0
     completed = 0
     eligible = [item for item in pending if item["reason"] != "sensitive"]

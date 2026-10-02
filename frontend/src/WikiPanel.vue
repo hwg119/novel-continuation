@@ -25,10 +25,13 @@ const profile = ref<Profile | null>(null)
 const profileBusy = ref(false)
 const profileFilter = ref<ClaimStatus>('supported')
 const recordTab = ref<RecordTab>('stable')
+const timelineChapter = ref<number | 'all'>('all')
 const relationPeer = ref('')
 const asOf = ref<number | null>(null)
 const start = ref(1)
 const end = ref(100)
+const advancedOpen = ref(false)
+const forceRange = ref(false)
 const busy = ref(false)
 const feedback = ref('')
 const error = ref('')
@@ -50,6 +53,10 @@ const profileCounts = computed(() => {
   return counts
 })
 const visibleClaims = computed(() => (profile.value?.claims || []).filter(claim => (claim.status || 'unverified') === profileFilter.value))
+const timelineChapters = computed(() => [...new Set((entity.value?.timeline || []).map(fact => fact.chapter))].sort((a, b) => b - a))
+const visibleTimeline = computed(() => timelineChapter.value === 'all'
+  ? entity.value?.timeline || []
+  : (entity.value?.timeline || []).filter(fact => fact.chapter === timelineChapter.value))
 const visibleRelations = computed(() => {
   if (!relationPeer.value) return entity.value?.relationships || []
   return (entity.value?.relationships || []).filter(relation =>
@@ -79,7 +86,12 @@ async function loadEntity() {
   try {
     const before = asOf.value && asOf.value > 0 ? `?before_chapter=${asOf.value + 1}` : ''
     const result = await api<Entity>(`/api/projects/${props.projectId}/wiki/subjects/${encodeURIComponent(selected.value)}${before}`)
-    if (request === entityRequest) entity.value = result
+    if (request === entityRequest) {
+      entity.value = result
+      const chapters = [...new Set(result.timeline.map(fact => fact.chapter))].sort((a, b) => b - a)
+      if (timelineChapter.value !== 'all' && !chapters.includes(timelineChapter.value)) timelineChapter.value = chapters[0] || 'all'
+      if (timelineChapter.value === 'all' && chapters.length) timelineChapter.value = chapters[0]
+    }
   } catch (cause) { if (request === entityRequest) error.value = String(cause) }
 }
 async function loadProfile() {
@@ -184,6 +196,42 @@ async function build(onlyPending = false) {
     void poll()
   } catch (cause) { busy.value = false; error.value = String(cause) }
 }
+async function buildRange() {
+  if (!props.projectId || !props.modelName || busy.value) return
+  if (start.value < 1 || end.value < start.value) { error.value = '请输入有效的章节范围。'; return }
+  const rangePending = pending.value.filter(item => item.chapter >= start.value && item.chapter <= end.value && item.reason !== 'sensitive')
+  const count = forceRange.value ? end.value - start.value + 1 : rangePending.length
+  if (!forceRange.value && !count) { error.value = '所选范围内没有待更新章节。'; return }
+  const confirmed = await askConfirm({
+    title: forceRange.value ? `强制重建第 ${start.value}～${end.value} 章 Wiki？` : `更新范围内 ${count} 章 Wiki？`,
+    message: forceRange.value
+      ? '范围内已有缓存也会被模型重新编纂并覆盖。耗时和调用成本取决于实际存在的章节数量。'
+      : '只处理该范围内新增、正文变化或缓存版本过旧的章节；其余章节不会调用模型。',
+    symbol: forceRange.value ? '重' : '辑',
+    confirmLabel: forceRange.value ? '确认强制重建' : '开始分批更新',
+    modelName: props.modelName,
+  })
+  if (!confirmed) return
+  busy.value = true; error.value = ''
+  const project = props.projectId
+  try {
+    const started = await api<{ id: string }>(`/api/projects/${project}/wiki/pending`,
+      writeOptions('POST', { start: start.value, end: end.value, force: forceRange.value, model_name: props.modelName }))
+    emit('task', started.id)
+    feedback.value = forceRange.value ? '正在强制重建所选范围；可在底部控制台查看进度。' : '正在分批更新所选范围；可在底部控制台查看进度。'
+    const poll = async () => {
+      try {
+        const job = await api<Job>(`/api/projects/${project}/jobs/${started.id}`)
+        if (job.status === 'running') { setTimeout(poll, 2500); return }
+        busy.value = false
+        if (job.status !== 'completed') { error.value = job.message; return }
+        feedback.value = `Wiki 已更新：${job.result?.chapters || 0} 章、${job.result?.facts || 0} 条可溯源事实。`
+        if (project === props.projectId) { await Promise.all([load(), loadPending()]); await loadEntity(); await loadProfile() }
+      } catch (cause) { busy.value = false; error.value = String(cause) }
+    }
+    void poll()
+  } catch (cause) { busy.value = false; error.value = String(cause) }
+}
 async function retrySensitive(chapter: number) {
   const model = retryModel.value || props.modelName
   if (!props.projectId || !model || busy.value) return
@@ -208,8 +256,8 @@ async function retrySensitive(chapter: number) {
     void poll()
   } catch (cause) { busy.value = false; error.value = String(cause) }
 }
-watch(() => props.projectId, () => { selected.value = ''; entity.value = null; retryModel.value = props.modelName; reviewModel.value = props.modelName; void Promise.all([load(), loadPending(), loadReview()]) })
-watch([selected, asOf], () => { relationPeer.value = ''; void loadEntity(); void loadProfile() })
+watch(() => props.projectId, () => { selected.value = ''; entity.value = null; timelineChapter.value = 'all'; retryModel.value = props.modelName; reviewModel.value = props.modelName; void Promise.all([load(), loadPending(), loadReview()]) })
+watch([selected, asOf], () => { relationPeer.value = ''; timelineChapter.value = 'all'; void loadEntity(); void loadProfile() })
 onMounted(() => { if (props.currentChapter) end.value = props.currentChapter; reviewModel.value = props.modelName; void Promise.all([load(), loadPending(), loadReview()]) })
 </script>
 
@@ -222,7 +270,10 @@ onMounted(() => { if (props.currentChapter) end.value = props.currentChapter; re
     <p v-if="reviewState.counts.pending" class="muted-note">待处理主要来自人物关系、稳定设定、重要状态变化和证据主体不明确的记录。</p><p v-else class="muted-note">当前没有尚未复核的高风险事实。</p>
     <div v-if="reviewOpen" class="wiki-review-history"><article v-for="item in reviewState.recent" :key="item.id" :class="`review-${item.status}`"><div><span>第 {{ item.chapter }} 章</span><b>{{ item.status === 'kept' ? '保留' : item.status === 'corrected' ? '已修正' : item.status === 'rejected' ? '已移除' : '不确定' }}</b></div><strong>{{ item.subject }} · {{ item.predicate }} · {{ item.value }}</strong><p>{{ item.reason }}</p><blockquote>{{ item.quote }}</blockquote></article></div>
   </section>
-  <section class="panel"><h2>自动编纂</h2><div class="inline-fields"><label>起始章<input v-model.number="start" type="number" min="1"></label><label>结束章<input v-model.number="end" type="number" min="1"></label><button :disabled="busy || !projectId || !modelName" @click="build(false)">{{ busy ? '编纂中…' : '按范围编纂 Wiki' }}</button></div><p class="muted-note">仅正文未变且已是新版的章节使用缓存。可先选少量章节升级，核对效果后再扩展范围。</p></section>
+  <section class="panel wiki-advanced">
+    <button class="wiki-advanced-toggle" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen"><span><small>高级操作</small><strong>分批处理与范围重建</strong></span><b>{{ advancedOpen ? '收起' : '展开' }} {{ advancedOpen ? '↑' : '↓' }}</b></button>
+    <div v-if="advancedOpen" class="wiki-advanced-body"><p>首次编纂可先选少量章节验证效果；日常维护优先使用上方的一键更新。</p><div class="inline-fields"><label>起始章<input v-model.number="start" type="number" min="1"></label><label>结束章<input v-model.number="end" type="number" min="1"></label><button :disabled="busy || !projectId || !modelName" @click="buildRange">{{ busy ? '处理中…' : forceRange ? '强制重建此范围' : '分批更新此范围' }}</button></div><label class="wiki-force-option"><input v-model="forceRange" type="checkbox"><span><strong>强制重建此范围</strong><small>忽略已有缓存，重新调用模型并覆盖对应章节的 Wiki。</small></span></label></div>
+  </section>
   <section class="panel wiki-library"><div class="wiki-library-tools"><label>查找人物、地点或物品<input v-model="query" placeholder="输入实体名称" @input="load"></label><label>只看截至第几章<input v-model.number="asOf" type="number" min="1" placeholder="全部章节"></label></div><div class="wiki-grid"><nav class="wiki-index" aria-label="Wiki 条目"><button v-for="item in subjects" :key="item.subject" :class="{ chosen: selected === item.subject }" @click="selected = item.subject">{{ item.subject }} <small>{{ item.facts.length }}</small></button><p v-if="!subjects.length">尚无 Wiki 内容。先选择章节范围开始编纂。</p></nav>
     <div v-if="entity" class="wiki-entity"><div class="wiki-entity-head"><span class="eyebrow">人物与世界档案</span><h2>{{ entity.subject }}</h2><p>{{ entity.facts_count }} 条可核对记录{{ asOf ? ` · 截至第 ${asOf} 章` : '' }}</p></div><aside class="wiki-evidence-note"><strong>这里记录原文曾经写过什么</strong><span>状态和关系可能被后文改变；判断续写时的当前情况，应以最近章节为准。</span></aside>
     <section class="wiki-profile">
@@ -251,8 +302,9 @@ onMounted(() => { if (props.currentChapter) end.value = props.currentChapter; re
       <div class="wiki-record-list"><article v-for="(fact, index) in entity.stable" :key="`s${index}`" class="wiki-fact"><div class="wiki-fact-meta"><span>第 {{ fact.chapter }} 章</span><span>较稳定记录 · 较晚正文优先</span><span v-if="fact.story_time">{{ fact.story_time }}</span></div><strong>{{ fact.predicate }} · {{ fact.value }}</strong><blockquote>{{ fact.quote }}</blockquote><button class="text-button" @click="emit('openChapter', fact.chapter)">核对第 {{ fact.chapter }} 章原文 ↗</button></article></div>
     </section>
     <section v-else-if="recordTab === 'timeline'" class="wiki-record-panel" role="tabpanel">
-      <h3>经历与状态时间线</h3><p class="wiki-section-note">按原文出现章节记录，不自动推断当前状态。</p><p v-if="!entity.timeline.length" class="wiki-empty">暂无提取记录。</p>
-      <article v-for="(fact, index) in entity.timeline" :key="`t${index}`" class="wiki-fact wiki-timeline"><div class="wiki-fact-meta"><span>第 {{ fact.chapter }} 章</span><span>{{ fact.kind === 'state' ? '当时状态 · 当前是否仍成立未知' : '已发生事件 · 不代表当前状态' }}</span><span v-if="fact.story_time">{{ fact.story_time }}</span></div><strong>{{ fact.predicate }} · {{ fact.value }}</strong><blockquote>{{ fact.quote }}</blockquote><button class="text-button" @click="emit('openChapter', fact.chapter)">核对第 {{ fact.chapter }} 章原文 ↗</button></article>
+      <div class="wiki-timeline-head"><div><h3>经历与状态时间线</h3><p class="wiki-section-note">按原文出现章节记录，不自动推断当前状态。</p></div><label v-if="timelineChapters.length">记录章节<select v-model="timelineChapter"><option v-for="chapter in timelineChapters" :key="chapter" :value="chapter">第 {{ chapter }} 章</option><option value="all">全部记录（可能较慢）</option></select></label></div><p v-if="!entity.timeline.length" class="wiki-empty">暂无提取记录。</p>
+      <p v-else class="wiki-timeline-count">当前显示 {{ visibleTimeline.length }} 条 · 共 {{ entity.timeline.length }} 条记录</p>
+      <article v-for="(fact, index) in visibleTimeline" :key="`t${fact.chapter}-${index}`" class="wiki-fact wiki-timeline"><div class="wiki-fact-meta"><span>第 {{ fact.chapter }} 章</span><span>{{ fact.kind === 'state' ? '当时状态 · 当前是否仍成立未知' : '已发生事件 · 不代表当前状态' }}</span><span v-if="fact.story_time">{{ fact.story_time }}</span></div><strong>{{ fact.predicate }} · {{ fact.value }}</strong><blockquote>{{ fact.quote }}</blockquote><button class="text-button" @click="emit('openChapter', fact.chapter)">核对第 {{ fact.chapter }} 章原文 ↗</button></article>
     </section>
     <section v-else class="wiki-record-panel wiki-relationships" role="tabpanel">
       <div class="wiki-relationship-title"><div><h3>人物关系原文记录</h3><p class="wiki-section-note">此处为当前人物概览；完整关系谱不会省略节点。</p></div><button class="secondary" @click="emit('openGraph')">打开完整关系图 ↗</button></div><p v-if="!entity.relationships.length" class="wiki-empty">暂无可验证的关系。旧 Wiki 缓存需升级后才会提取关系对象。</p>
