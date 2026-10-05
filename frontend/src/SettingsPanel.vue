@@ -177,7 +177,9 @@ async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
         toastMessage.value = 'AI 回目与分幕已生成并保存，可直接生成插图或开始续写'
       } else {
         toastMessage.value = kind === 'plan-revise'
-          ? '修订后的分幕已填入；原规划尚未被保存覆盖'
+          ? planningReview.value?.status === 'passed'
+            ? '分幕修订要求验收通过；候选已填入，请保存设定后生效'
+            : '分幕候选已填入，但要求尚未通过验收；请查看提醒，原规划未被保存覆盖'
           : 'AI 建议已填入；检查后请保存设定'
       }
     }
@@ -206,7 +208,7 @@ async function revisePlan() {
   if (!props.modelName) { error.value = '请先选择大模型配置。'; return }
   if (!await askConfirm({
     title: `按问题修订第 ${chapter.value} 章规划？`,
-    message: '模型会保留未受影响的分幕，只针对问题点调整完整规划。结果先填入页面，点击“保存设定”后才会覆盖已保存版本。',
+    message: '模型会针对问题调整规划，再对照用户要求验收。未落实时最多补修一次。候选先填入页面，不会自动覆盖已保存规划；确认后请保存设定。',
     symbol: '修', confirmLabel: '使用此模型修订', modelName: props.modelName,
   })) return
   await start('plan-revise')
@@ -281,6 +283,12 @@ onMounted(() => { void load() })
     </section></div>
   <template v-else><section class="panel chapter-settings"><h2>第 {{ chapter }} 章规划</h2>
     <p v-if="planningReview" class="muted-note">规划检查：{{ reviewLabels[planningReview.status] || planningReview.status }}。编辑后请结合正文核对。</p>
+    <div v-if="planningReview?.source === 'user_revision'" :class="['notice', { error: planningReview.status !== 'passed' }]" role="status">
+      <strong>{{ planningReview.status === 'passed' ? '修订要求验收通过' : planningReview.status === 'incomplete' ? '修订要求尚未完成验收' : '修订要求尚未落实' }}</strong>
+      <p>{{ planningReview.summary }}</p>
+      <p v-if="planningReview.changes">分幕内容变化：{{ planningReview.changes.content_changed_beats.length ? '第 ' + planningReview.changes.content_changed_beats.join('、') + ' 幕' : planningReview.requirement_scope === 'labels' ? '无（本次仅调整名称或表达）' : '无；仅改名不能落实情节类要求' }}。这是候选稿，保存后才生效。</p>
+      <p v-for="(note, index) in planningReview.unresolved || []" :key="index">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
+    </div>
     <details v-if="planningReview?.editorial_notes?.length"><summary>编辑提醒与修补记录（{{ planningReview.editorial_notes.length }} 项，仍需核对）</summary>
       <p v-for="(note, index) in planningReview.editorial_notes" :key="index" class="muted-note">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
     </details>

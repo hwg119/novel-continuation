@@ -1389,7 +1389,7 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 
 程序指定目标为第 {settings.get('chapter_number', '')} 章；title 只输出回目文字，不含章号。
 
-这是一项定向修订，不是从零规划：保留没有被问题影响的幕、人物线、有效线索和节奏；只修改解决问题所必需的部分。若调整一幕会影响后续幕，必须同步修正其时间、人物已知信息和结尾状态。
+这是一项定向修订，不是从零规划：保留未受影响的人物线、有效线索和故事基础。用户要求改善节奏、趣味或波折时，可以改变必要幕的实际事件、阻力、人物选择或结果，不能仅更换回目、幕名或形容词，也不能以保留原稿为由拒绝实质调整。若调整一幕影响后续幕，必须同步修正其时间、人物已知信息和结尾状态。仅要求改名称或文字时，不额外改变剧情。
 
 信息优先级：用户问题点 > 当前章专属要求 > 上一章正文结尾 > 有效摘要 > 最近 Wiki > 全书背景。
 【用户指出的问题点】
@@ -1424,13 +1424,20 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 没有主要新增元素的幕输出 "new_elements":[]；恰好 {num_beats} 幕。只输出 JSON。"""
     data = None
     parse_error = None
+    from core.plan_revision_check import check_revision
+    original_plan = {'chapter_title':current['title'],'beats':current_beats}
+    candidate = None
+    acceptance = None
     for attempt in range(2):
+        data = None
         request = prompt if attempt == 0 else (
-            "上次修订未通过结构或连续性检查：" +
+            "上次修订未落实要求或未通过结构检查：" +
             "；".join(parse_error or ["JSON 无效"]) +
             "。请保持定向修订，修正后直接输出完整 JSON。\n\n" + prompt)
         if audit:
             audit.write("model_request", stage="user_plan_revision", attempt=attempt + 1, prompt=request)
+        if progress:
+            progress('正在按用户问题修订分幕' if attempt == 0 else '正在定向补修未落实要求（最多一次）')
         raw = llm.complete(
             request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
             temperature=0.3 if attempt == 0 else 0.1,
@@ -1441,18 +1448,40 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             data = _first_json_object(raw)
             parse_error = _chapter_plan_issues(data, num_beats, previous_context)
             if not parse_error:
-                break
+                title = _plan_title(data.get('title'),settings.get('chapter_number'))
+                beats = _parse_beats(json.dumps(data.get('beats'),ensure_ascii=False),num_beats)
+                if not title or len(beats)!=num_beats:
+                    raise ValueError('修订后的章节规划缺少回目或分幕数量不符。')
+                candidate = {'chapter_title':title,'beats':beats}
+                if progress: progress('正在对比实际变化并验收用户修订要求')
+                acceptance = check_revision(original_plan,candidate,issues[:5000],llm,
+                    _first_json_object,previous_context,audit,attempt+1)
+                if acceptance['status'] in ('passed','incomplete'): break
+                parse_error = [f"{n['scope']}：{n['problem']}；补修：{n['suggestion']}"
+                               for n in acceptance['unresolved']]
+                if progress:
+                    progress('要求尚未落实：'+ '；'.join(n['problem'] for n in acceptance['unresolved'])[:500])
+                if attempt == 1: break
             data = None
         except ValueError as exc:
+            data = None
             parse_error = [str(exc)]
-    if data is None:
+    if candidate is None:
         raise ValueError("章节规划修订未通过：" +
                          "；".join(parse_error or ["模型未返回章节规划 JSON"]))
-    title = _plan_title(data.get("title"), settings.get("chapter_number"))
-    beats = _parse_beats(json.dumps(data.get("beats"), ensure_ascii=False), num_beats)
-    if not title or len(beats) != num_beats:
-        raise ValueError("修订后的章节规划缺少回目或分幕数量不符。")
-    return {"chapter_title": title, "beats": beats}
+    if data is None:
+        acceptance = {'status':'incomplete','summary':'补修结构检查失败，保留前一版候选供核对。',
+                      'unresolved':[{'scope':'补修','problem':'；'.join(parse_error or []),'suggestion':'重新修订'}]}
+    review = {**(acceptance or {}),'source':'user_revision','requirements':issues[:5000],
+              'generation_attempts':attempt+1,'editorial_notes':[]}
+    if progress:
+        progress('分幕修订要求验收通过；候选已生成，保存后生效' if review.get('status')=='passed'
+                 else '分幕候选已生成，但要求验收未通过或未完成，请核对后再保存')
+    if audit:
+        audit.write('user_plan_revision_result',planning_review=review,
+                    chapter_title=candidate['chapter_title'])
+    return {**candidate,'planning_review':review,
+            'log_path':str(getattr(audit,'path','')) if audit else ''}
 
 
 def _plan_title(value, chapter_number=None):

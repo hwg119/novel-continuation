@@ -19,7 +19,7 @@ def load_agent_skill(name, reference=None):
     content = path.read_bytes()
     if reference is not None:
         references = {"chapter-revision": {"local", "whole", "acceptance"},
-                      "chapter-planning": {"draft", "review", "repair", "acceptance"},
+                      "chapter-planning": {"draft", "review", "repair", "acceptance", "user-acceptance"},
                       "prose-polish": {"acceptance"}}
         if reference not in references.get(name, set()):
             raise ValueError("不支持的 Skill 参考")
