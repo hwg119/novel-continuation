@@ -60,6 +60,10 @@ Skill 方法参考了 [awesome-novel-agent](https://github.com/modoojunko/awesom
 
 插图生成需要可用的大模型配置，Word 导出本身不会调用模型。
 
+插图采用自由 SVG 意象图，由模型依据本章设计原创构图，不依赖素材库，支持路径、曲线、渐变和空间层次。保存前经过静态校验与 resvg 渲染，失败保留当前插图，最多生成两次。正文、插图预览与 Word 使用相同渲染器，自由绘制过程保留完整日志。
+
+resvg 依赖随 `npm install --prefix frontend` 安装；后端渲染时需要 Node.js 在 PATH 中，无需新增常驻服务。依赖缺失会在调用模型前提示安装，插图预览及带插图的 Word 导出也需要该依赖。
+
 ## 工程数据与持久化
 
 ```text

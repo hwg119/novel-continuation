@@ -27,10 +27,11 @@ const reviewLabels: Record<string, string> = {
 const revisionIssues = ref('')
 const startingContinuation = ref(false)
 const illustrationSvg = ref('')
+const illustrationPng = ref('')
 const illustrationBusy = ref(false)
 const illustrationLoading = ref(false)
-const illustrationPreview = computed(() => illustrationSvg.value ?
-  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(illustrationSvg.value)}` : '')
+const illustrationPreview = computed(() => illustrationPng.value || (illustrationSvg.value ?
+  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(illustrationSvg.value)}` : ''))
 
 type BeatView = { num: string; name: string; desc: string; structured: boolean;
   pov: string; time: string; location: string; story: string; known: string;
@@ -64,12 +65,15 @@ const beatViews = computed(() => parseBeats().map(beatView))
 
 async function loadIllustration(number: number, project = props.projectId) {
   illustrationSvg.value = ''
+  illustrationPng.value = ''
   if (!project || number < 1) return
   illustrationLoading.value = true
-  try { const result = await api<{ exists: boolean; svg: string }>(
+  try { const result = await api<{ exists: boolean; svg: string; png?: string }>(
     `/api/projects/${project}/chapters/${number}/illustration`)
-    if (project === props.projectId && number === chapter.value)
+    if (project === props.projectId && number === chapter.value) {
       illustrationSvg.value = result.exists ? result.svg : ''
+      illustrationPng.value = result.exists ? result.png || '' : ''
+    }
   } catch (cause) { if (project === props.projectId && number === chapter.value) error.value = String(cause) }
   finally { illustrationLoading.value = false }
 }
@@ -89,6 +93,7 @@ function planFor(number: number) {
 async function load() {
   if (!props.projectId) return
   try { settings.value = await api(`/api/projects/${props.projectId}/settings`)
+    settings.value.illustration_method = 'free'
     chapter.value = props.currentChapter || Number(settings.value.chapter_number) || 1
     glossaryText.value = Object.entries(settings.value.glossary || {}).map(([key, value]) =>
       `${(settings.value.glossary_hard_terms || []).includes(key) ? '!' : ''}${key}=${value}`).join('\n')
@@ -110,7 +115,8 @@ function parseGlossary() {
 }
 async function save(showToast = true): Promise<boolean> {
   if (!props.projectId) return false
-  parseGlossary()
+    parseGlossary()
+    settings.value.illustration_method = 'free'
   settings.value.chapter_number = chapter.value
   settings.value.beats = parseBeats()
   settings.value.chapter_plans ||= {}
@@ -210,9 +216,7 @@ async function generateIllustration() {
   const replacing = Boolean(illustrationSvg.value)
   if (!await askConfirm({
     title: replacing ? `替换第 ${chapter.value} 章插图？` : `生成第 ${chapter.value} 章插图？`,
-    message: replacing
-      ? '模型将重新选择本章场景并生成 SVG；现有插图会被新版本覆盖。'
-      : '模型将根据本章正文、分幕和插图画风选择场景，并生成一幅 SVG 插图。',
+    message: '模型根据本章设计原创构图，生成支持曲线、分组和渐变的自由 SVG，不限素材目录。经 resvg 渲染校验后替换旧图；失败保留原图，最多两次生成。',
     symbol: '图',
     confirmLabel: replacing ? '使用此模型重新生成' : '使用此模型生成',
     modelName: props.modelName,
@@ -224,6 +228,7 @@ async function generateIllustration() {
     `/api/projects/${project}/chapters/${number}/illustration`,
     writeOptions('POST', { model_name: props.modelName,
       preview: { chapter_title: settings.value.chapter_title,
+        illustration_method: 'free',
         chapter_brief: settings.value.chapter_brief, beats: parseBeats(),
         illustration_style: settings.value.illustration_style,
         illustration_style_notes: settings.value.illustration_style_notes } }))
@@ -254,6 +259,7 @@ onMounted(() => { void load() })
   <div v-if="mode === 'global'" class="settings-grid"><section class="panel"><h2>基础设定</h2>
     <label>工程名<input v-model="settings.name"></label><label>母本出处<input v-model="settings.source_novel"></label>
     <label>本书背景<textarea v-model="settings.background" rows="6"></textarea></label>
+    <label>插图生成方式<select v-model="settings.illustration_method"><option value="free">自由 SVG 意象图</option></select></label>
     <label>插图画风<select v-model="settings.illustration_style"><option value="auto">依小说内容自动选择</option>
       <option value="wuxia">武侠绘本</option><option value="ink">水墨剪影</option>
       <option value="children">儿童绘本</option><option value="custom">自定义</option></select></label>
@@ -313,10 +319,11 @@ onMounted(() => { void load() })
       <p>这里的修改会实时反映到上方路线图；保存时仍使用兼容现有工程的分幕格式。</p>
     </details></section>
     <section class="panel chapter-settings illustration-panel"><div class="illustration-head"><div><span class="eyebrow">章节图版 · {{ String(chapter).padStart(3, '0') }}</span><h2>本章插图</h2></div>
-      <button :disabled="illustrationBusy || illustrationLoading || !modelName || chapter < 1" @click="generateIllustration">{{ illustrationBusy ? '生成中…' : illustrationSvg ? '重新生成插图' : 'AI 生成 SVG 插图' }}</button></div>
+      <button :disabled="illustrationBusy || illustrationLoading || !modelName || chapter < 1" @click="generateIllustration">{{ illustrationBusy ? '生成中…' : illustrationSvg ? '重新生成插图' : '生成本章插图' }}</button></div>
+      <label>生成方式<select v-model="settings.illustration_method" :disabled="illustrationBusy"><option value="free">自由 SVG 意象图</option></select></label>
       <div class="illustration-frame"><img v-if="illustrationSvg" :src="illustrationPreview" :alt="`第 ${chapter} 章插图预览`">
         <p v-else>{{ illustrationLoading ? '正在载入本章插图…' : '本章尚无插图。导出 Word 时将保留标题与正文，不插入图片。' }}</p></div>
-      <p class="muted-note">先从本章资料选取一个具体场景，再按“全书规则”中的插图画风绘制；重新生成会替换旧图。</p></section></template>
+      <p class="muted-note">不受素材目录限制：由模型自由设计构图，支持曲线、分组、渐变、透明度和裁剪。预览与 Word 共用 resvg 渲染。生成成功后替换旧图，失败保留原图。</p></section></template>
   <div class="sticky-actions"><button @click="save()">保存设定</button><button class="subtle" @click="load">重新载入</button>
     <button v-if="mode === 'chapter'" class="continue-button" :disabled="startingContinuation || generating || running || !modelName || !parseBeats().length" @click="startContinuation"><span v-if="startingContinuation || generating" class="button-spinner" aria-hidden="true"></span>{{ startingContinuation ? '正在保存…' : generating ? '续写中…' : '开始续写' }}</button></div>
 </div></template>

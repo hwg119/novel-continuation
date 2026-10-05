@@ -979,12 +979,18 @@ def register_features(app: FastAPI, workspace_root: str,
 
     @app.get("/api/projects/{project_id}/chapters/{number}/illustration")
     def get_chapter_illustration(project_id: str, number: int):
+        import base64
         from core.chapter_illustration import illustration_path, validate_illustration_svg
+        from core.chapter_export import render_svg_png
         target = illustration_path(project_path(project_id), number)
         if not target.is_file():
             return {"exists": False, "svg": ""}
         svg = validate_illustration_svg(target.read_text(encoding="utf-8"))
-        return {"exists": True, "svg": svg}
+        with tempfile.TemporaryDirectory() as directory:
+            png = Path(directory) / 'preview.png'
+            render_svg_png(svg, str(png))
+            preview = 'data:image/png;base64,' + base64.b64encode(png.read_bytes()).decode('ascii')
+        return {"exists": True, "svg": svg, "png": preview}
 
     @app.post("/api/projects/{project_id}/chapters/{number}/illustration",
               dependencies=[Depends(_write_required)])

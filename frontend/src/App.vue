@@ -22,7 +22,7 @@ type Project = { id: string; name: string; path: string }
 type Chapter = { number: number; filename: string; title: string; generated_at: string | null; modified_at: string }
 type ChapterFile = { number: number; text: string; revision: string }
 type ChapterSummary = { number: number; text: string; exists: boolean; valid: boolean; issues: string[] }
-type ChapterIllustration = { exists: boolean; svg: string }
+type ChapterIllustration = { exists: boolean; svg: string; png?: string }
 type ChapterSearchResult = { chapter: number; segment: number; text: string; relevance: number;
   semantic_score: number | null; matched_terms: string[]; constraint_mode: string }
 type Tab = 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config'
@@ -130,7 +130,8 @@ const wordCount = computed(() => text.value.replace(/\s/g, '').length)
 const title = computed(() => text.value.split(/\r?\n/, 1)[0]?.trim() || '未命名章节')
 const chapterTitles = computed(() => new Map(chapters.value.map(item => [item.number, item.title])))
 const chapterIllustrationUrl = computed(() => chapterIllustration.value
-  ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(chapterIllustration.value)}` : '')
+  ? chapterIllustration.value.startsWith('data:image/png;') ? chapterIllustration.value
+    : `data:image/svg+xml;charset=utf-8,${encodeURIComponent(chapterIllustration.value)}` : '')
 const bookParagraphs = computed(() => {
   const lines = text.value.replace(/\r\n/g, '\n').split('\n')
   const firstContent = lines.findIndex(line => line.trim())
@@ -308,7 +309,7 @@ async function loadChapterIllustration(number = chapterNumber.value, project = p
   try {
     const result = await api<ChapterIllustration>(`/api/projects/${project}/chapters/${number}/illustration`)
     if (projectId.value === project && chapterNumber.value === number) {
-      chapterIllustration.value = result.exists ? result.svg : ''
+      chapterIllustration.value = result.exists ? result.png || result.svg : ''
     }
   } catch {
     if (projectId.value === project && chapterNumber.value === number) chapterIllustration.value = ''

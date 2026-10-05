@@ -43,6 +43,7 @@ DEFAULT_PROJECT_SETTINGS = {
     "chapter_requirements": "",
     "chapter_plans": {},
     "illustration_style": "auto",
+    "illustration_method": "free",
     "illustration_style_notes": "",
     "forbidden_words": [],
     "character_voices": "",

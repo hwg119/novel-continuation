@@ -11,42 +11,9 @@ ET.register_namespace("", SVG_NS)
 
 
 def render_svg_png(svg: str, png_path: str, scale: int = 2) -> None:
-    """把本模块支持的安全 SVG 几何元素栅格化，无外部渲染进程。"""
-    from PIL import Image, ImageDraw
-
-    root = ET.fromstring(svg)
-    if root.tag != f"{{{SVG_NS}}}svg":
-        raise ValueError("无效的 SVG 根元素")
-    image = Image.new("RGB", (WIDTH * scale, HEIGHT * scale), "#ffffff")
-    draw = ImageDraw.Draw(image)
-    def n(element, key):
-        return float(element.attrib[key]) * scale
-    for element in root:
-        kind = element.tag.rsplit("}", 1)[-1]
-        fill = element.attrib.get("fill", "#000000")
-        if not re.fullmatch(r"#[0-9a-fA-F]{6}", fill):
-            raise ValueError("SVG 颜色无效")
-        if kind == "rect":
-            x, y = n(element, "x"), n(element, "y")
-            draw.rectangle((x, y, x + n(element, "width"), y + n(element, "height")),
-                           fill=fill)
-        elif kind in ("circle", "ellipse"):
-            cx, cy = n(element, "cx"), n(element, "cy")
-            rx = n(element, "r") if kind == "circle" else n(element, "rx")
-            ry = n(element, "r") if kind == "circle" else n(element, "ry")
-            draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=fill)
-        elif kind == "polygon":
-            points = [tuple(float(v) * scale for v in pair.split(","))
-                      for pair in element.attrib["points"].split()]
-            draw.polygon(points, fill=fill)
-        elif kind == "line":
-            draw.line((n(element, "x1"), n(element, "y1"),
-                       n(element, "x2"), n(element, "y2")),
-                      fill=element.attrib["stroke"],
-                      width=round(n(element, "stroke-width")))
-        else:
-            raise ValueError(f"不支持的 SVG 元素：{kind}")
-    image.save(png_path, format="PNG")
+    """统一使用 resvg，保持正文预览与 Word 插图一致。"""
+    from core.svg_renderer import render_resvg_png
+    render_resvg_png(svg, png_path, scale)
 
 
 def export_chapter_docx(title: str, body: str, output_path: str,
