@@ -206,6 +206,7 @@ def save_project_settings(project_dir: str, settings: dict) -> bool:
 def settings_for_chapter(settings: dict, chapter_number: int) -> dict:
     """把当前章专属回目、目标与分幕覆盖到全书规则上。"""
     result = dict(settings)
+    result["chapter_number"] = int(chapter_number)
     plans = settings.get("chapter_plans") or {}
     plan = plans.get(str(chapter_number)) if isinstance(plans, dict) else None
     if isinstance(plan, dict):

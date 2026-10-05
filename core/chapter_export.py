@@ -141,6 +141,92 @@ def export_chapter_docx(title: str, body: str, output_path: str,
             "illustrated": bool(png_path)}
 
 
+def export_chapters_docx(chapters: list[dict], output_path: str) -> dict:
+    """把多个章节按章分页合并到一个 Word 文档中。"""
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Inches, Pt, RGBColor
+
+    if not chapters:
+        raise ValueError("请至少选择一个章节")
+    path = Path(output_path)
+    if path.suffix.lower() != ".docx":
+        raise ValueError("导出路径必须以 .docx 结尾")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def set_chinese_font(style, family):
+        style.font.name = family
+        properties = style._element.get_or_add_rPr()
+        fonts = properties.rFonts
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            properties.insert(0, fonts)
+        for kind in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(qn(f"w:{kind}"), family)
+
+    doc = Document()
+    section = doc.sections[0]
+    section.page_width, section.page_height = Inches(8.5), Inches(11)
+    section.top_margin = section.bottom_margin = Inches(0.8)
+    section.left_margin = section.right_margin = Inches(0.85)
+    normal = doc.styles["Normal"]
+    set_chinese_font(normal, "Microsoft YaHei")
+    normal.font.size = Pt(11)
+    normal.font.color.rgb = RGBColor(40, 43, 46)
+    normal.paragraph_format.line_spacing = 1.15
+    normal.paragraph_format.space_after = Pt(6)
+    normal.paragraph_format.widow_control = True
+    set_chinese_font(doc.styles["Title"], "Microsoft YaHei")
+    footer = section.footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run("第 ").font.size = Pt(9)
+    field = OxmlElement("w:fldSimple")
+    field.set(qn("w:instr"), "PAGE")
+    footer._p.append(field)
+    footer.add_run(" 页").font.size = Pt(9)
+
+    image_paths = []
+    for chapter_index, chapter in enumerate(chapters):
+        number = int(chapter.get("number") or 0)
+        if number < 1:
+            raise ValueError("章号必须大于零")
+        title = str(chapter.get("title") or "").strip() or "未命名章节"
+        body = str(chapter.get("body") or "").strip()
+        if not body:
+            raise ValueError(f"第 {number} 章正文为空")
+        if chapter_index:
+            doc.add_page_break()
+        display_title = title if re.match(r"^第\s*\d+\s*章", title) else f"第 {number} 章  {title}"
+        heading = doc.add_paragraph(style="Title")
+        heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        heading.paragraph_format.space_after = Pt(12)
+        run = heading.add_run(display_title)
+        run.font.name = "Microsoft YaHei"
+        run.font.size = Pt(20)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0, 0, 0)
+        svg = chapter.get("illustration_svg")
+        if svg:
+            from core.chapter_illustration import validate_illustration_svg
+            png_path = path.with_name(f"{path.stem}_chapter_{number}.png")
+            render_svg_png(validate_illustration_svg(str(svg)), str(png_path))
+            image_paths.append(str(png_path))
+            picture = doc.add_paragraph()
+            picture.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            picture.paragraph_format.space_after = Pt(18)
+            picture.add_run().add_picture(str(png_path), width=Inches(6.6))
+        for block in re.split(r"\n\s*\n", body):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            for index, line in enumerate(lines):
+                para = doc.add_paragraph(line)
+                para.paragraph_format.first_line_indent = Pt(25 if index == 0 else 0)
+                para.paragraph_format.space_after = Pt(6 if index == len(lines) - 1 else 0)
+    doc.save(str(path))
+    return {"docx": str(path), "pngs": image_paths, "chapters": len(chapters)}
+
+
 def export_learning_docx(title: str, edition: dict, output_path: str,
                          chapter_number: int, mode: str = "inline",
                          include_vocabulary: bool = True,

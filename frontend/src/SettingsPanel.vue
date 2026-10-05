@@ -16,6 +16,14 @@ const mode = ref<'global' | 'chapter'>('chapter')
 const toastMessage = ref('')
 const error = ref('')
 const running = ref(false)
+const activeTask = ref<'plan' | 'plan-revise' | 'book-rules' | ''>('')
+const planningReview = ref<Record<string, any> | null>(null)
+const reviewLabels: Record<string, string> = {
+  initial_review_only: '已完成初审，未做后验收', passed: '重写后验收通过',
+  patched_pending_review: '已局部修补，待确认', needs_review: '验收发现问题，待确认',
+  incomplete: '验收未完成，待确认',
+  editorial_pending_review: '已做文字规范，待确认',
+}
 const revisionIssues = ref('')
 const startingContinuation = ref(false)
 const illustrationSvg = ref('')
@@ -73,6 +81,7 @@ function planFor(number: number) {
   settings.value.chapter_title = plan.chapter_title || ''
   settings.value.chapter_brief = plan.chapter_brief || ''
   settings.value.chapter_requirements = plan.chapter_requirements || ''
+  planningReview.value = plan.planning_review || null
   beatsText.value = (plan.beats || []).map((beat: any) =>
     `${beat.num || ''} | ${beat.name || ''} | ${beat.desc || ''}`).join('\n')
   void loadIllustration(number)
@@ -107,7 +116,8 @@ async function save(showToast = true): Promise<boolean> {
   settings.value.chapter_plans ||= {}
   settings.value.chapter_plans[String(chapter.value)] = {
     chapter_title: settings.value.chapter_title || '', chapter_brief: settings.value.chapter_brief || '',
-    chapter_requirements: settings.value.chapter_requirements || '', beats: settings.value.beats }
+    chapter_requirements: settings.value.chapter_requirements || '', beats: settings.value.beats,
+    planning_review: planningReview.value }
   try { settings.value = await api(`/api/projects/${props.projectId}/settings`, writeOptions('PUT', settings.value))
     if (showToast) toastMessage.value = '续写设定已保存'
     error.value = ''; return true }
@@ -127,7 +137,7 @@ async function startContinuation() {
 }
 async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
   if (!props.projectId) return
-  running.value = true; error.value = ''
+  running.value = true; activeTask.value = kind; error.value = ''
   try {
     const route = kind === 'plan' ? 'plan' : kind === 'plan-revise' ? 'plan/revise' : 'book-rules'
     const started = await api<{ id: string }>(`/api/projects/${props.projectId}/${route}`,
@@ -143,10 +153,11 @@ async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
     const poll = async () => {
       const job = await api<Job>(`/api/projects/${props.projectId}/jobs/${started.id}`)
       if (job.status === 'running') { setTimeout(poll, 1500); return }
-      running.value = false
+      running.value = false; activeTask.value = ''
       if (job.status !== 'completed' || !job.result) { error.value = job.message; return }
       if (kind === 'plan' || kind === 'plan-revise') {
         settings.value.chapter_title = String(job.result.chapter_title || '')
+        planningReview.value = job.result.planning_review || null
         beatsText.value = ((job.result.beats || []) as any[]).map(beat =>
           `${beat.num} | ${beat.name} | ${beat.desc}`).join('\n')
         mode.value = 'chapter'
@@ -155,12 +166,32 @@ async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
           settings.value[key] = job.result[key] || ''
         mode.value = 'global'
       }
-      toastMessage.value = kind === 'plan-revise'
-        ? '修订后的分幕已填入；原规划尚未被保存覆盖'
-        : 'AI 建议已填入；检查后请保存设定'
+      if (kind === 'plan') {
+        if (!await save(false)) return
+        toastMessage.value = 'AI 回目与分幕已生成并保存，可直接生成插图或开始续写'
+      } else {
+        toastMessage.value = kind === 'plan-revise'
+          ? '修订后的分幕已填入；原规划尚未被保存覆盖'
+          : 'AI 建议已填入；检查后请保存设定'
+      }
     }
     void poll()
-  } catch (cause) { error.value = String(cause); running.value = false }
+  } catch (cause) { error.value = String(cause); running.value = false; activeTask.value = '' }
+}
+async function generatePlan() {
+  if (running.value) return
+  if (!props.modelName) { error.value = '请先选择大模型配置。'; return }
+  const replacing = Boolean(settings.value.chapter_title?.trim() || parseBeats().length)
+  if (!await askConfirm({
+    title: replacing ? `重新生成第 ${chapter.value} 章回目与分幕？` : `生成第 ${chapter.value} 章回目与分幕？`,
+    message: replacing
+      ? '模型会根据当前章目标、上一章上下文和 Wiki 重新规划；生成完成后将自动覆盖并保存本章现有回目与分幕。'
+      : '模型会根据当前章目标、上一章上下文和 Wiki 生成回目及完整分幕，并在完成后自动保存本章设定。',
+    symbol: '纲',
+    confirmLabel: replacing ? '使用此模型重新生成' : '使用此模型生成',
+    modelName: props.modelName,
+  })) return
+  await start('plan')
 }
 async function revisePlan() {
   if (running.value) return
@@ -243,19 +274,23 @@ onMounted(() => { void load() })
       <label class="check"><input v-model="settings.traditional" type="checkbox">繁体输出</label>
     </section></div>
   <template v-else><section class="panel chapter-settings"><h2>第 {{ chapter }} 章规划</h2>
+    <p v-if="planningReview" class="muted-note">规划检查：{{ reviewLabels[planningReview.status] || planningReview.status }}。编辑后请结合正文核对。</p>
+    <details v-if="planningReview?.editorial_notes?.length"><summary>编辑提醒与修补记录（{{ planningReview.editorial_notes.length }} 项，仍需核对）</summary>
+      <p v-for="(note, index) in planningReview.editorial_notes" :key="index" class="muted-note">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
+    </details>
     <div class="inline-fields"><label>章号<input v-model.number="chapter" type="number" min="1" @change="planFor(chapter); emit('chapter', chapter)"></label>
       <label>规划幕数<input v-model.number="settings.beats_per_chapter" type="number" min="1" max="12"></label></div>
     <label>本章回目<input v-model="settings.chapter_title"></label>
     <label>本章目标<textarea v-model="settings.chapter_brief" rows="4"></textarea></label>
     <label>本章专属要求<textarea v-model="settings.chapter_requirements" rows="4"></textarea></label>
     <div class="outline-heading"><div><span class="field-label">分幕大纲</span><p>按情节顺序阅读；展开“连续性依据”可核对人物在本幕知道什么。</p></div>
-      <button :disabled="running || !modelName" @click="start('plan')">AI 提取回目与分幕</button></div>
+      <button :disabled="running || !modelName" @click="generatePlan"><span v-if="activeTask === 'plan'" class="button-spinner" aria-hidden="true"></span>{{ activeTask === 'plan' ? '正在生成回目与分幕…' : 'AI 提取回目与分幕' }}</button></div>
     <section v-if="beatViews.length" class="plan-revision-box">
       <div class="revision-copy"><span class="revision-mark">定向修订</span><div><h3>把发现的问题交回给模型</h3>
         <p>逐条写明冲突、重复、节奏或人物行为问题；未提及的内容会尽量保留。</p></div></div>
       <textarea v-model="revisionIssues" rows="5" placeholder="例如：&#10;1. 第一幕与第三幕功能重复，请合并；&#10;2. 第二幕地点与工程设定冲突，请修正；&#10;3. 调查线索出现得太顺利，增加一个无法立即确认的歧义。"></textarea>
       <div class="revision-actions"><small>修订结果不会自动保存，可先检查新旧分幕。</small>
-        <button :disabled="running || !modelName || !revisionIssues.trim()" @click="revisePlan"><span v-if="running" class="button-spinner" aria-hidden="true"></span>{{ running ? '修订中…' : '按问题修改分幕' }}</button></div>
+        <button :disabled="running || !modelName || !revisionIssues.trim()" @click="revisePlan"><span v-if="activeTask === 'plan-revise'" class="button-spinner" aria-hidden="true"></span>{{ activeTask === 'plan-revise' ? '修订中…' : '按问题修改分幕' }}</button></div>
     </section>
     <div v-if="beatViews.length" class="beat-outline" aria-label="分幕大纲">
       <article v-for="(beat, index) in beatViews" :key="`${beat.num}-${index}`" class="outline-beat">

@@ -17,7 +17,7 @@ from core.chapter_revision import save_revision_snapshot
 from core.config_manager import APP_ROOT, get_embedding_config, load_config
 from core.project_manager import (chapter_path, list_chapter_files, list_projects,
                                   load_project_settings, settings_for_chapter)
-from web.jobs import JobStore
+from web.jobs import JobStore, JobConflictError
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,10 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
     save_lock = threading.Lock()
     jobs = JobStore()
     config_path = config_file or os.path.join(APP_ROOT, "config.json")
+
+    @app.exception_handler(JobConflictError)
+    async def job_conflict_error(_request, exc: JobConflictError):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(Exception)
     async def json_internal_error(_request, exc: Exception):
@@ -144,7 +148,8 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                             "kind": "ai_draft",
                             "candidate": result["candidate"], "source": result.get("source") or "",
                             "issues": result.get("issues") or [],
-                            "requirements": result.get("requirements") or ""})
+                            "requirements": result.get("requirements") or "",
+                            "revision_mode": result.get("revision_mode") or "whole"})
         from core.chapter_revision import load_revision_snapshot
         for path in (Path(project) / "runs" / "revisions").glob(f"chapter_{number}_*_before.json"):
             try:
@@ -171,6 +176,12 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                 continue
             records.append({"id": job["id"], "created_at": job.get("created_at"),
                             "report": result["report"],
+                            "revision_requirements": result.get("revision_requirements", ""),
+                            "audit_notes": result.get("audit_notes", []),
+                            "audit_kind": result.get("audit_kind", "consistency"),
+                            "story_summary": result.get("story_summary", ""),
+                            "story_details": result.get("story_details"),
+                            "story_enhancements": result.get("story_enhancements", []),
                             "retrieved_chars": result.get("retrieved_chars") or 0,
                             "previous_context_chars": result.get("previous_context_chars") or 0,
                             "wiki_chars": result.get("wiki_chars") or 0})

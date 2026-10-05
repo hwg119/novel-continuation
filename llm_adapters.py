@@ -39,11 +39,23 @@ class BaseLLMAdapter:
     def invoke(self, prompt: str) -> str:
         raise NotImplementedError("Subclasses must implement .invoke(prompt) method.")
 
+    def _record_response(self, response):
+        # 只保存诊断白名单，不保留请求头、密钥或完整思考内容。
+        metadata = getattr(response, "response_metadata", None) or {}
+        extra = getattr(response, "additional_kwargs", None) or {}
+        self.last_response_diagnostics = {
+            "finish_reason": metadata.get("finish_reason"),
+            "response_model": metadata.get("model_name"),
+            "usage": getattr(response, "usage_metadata", None) or metadata.get("token_usage"),
+            "reasoning_chars": len(str(extra.get("reasoning_content") or "")),
+            "response_present": response is not None,
+        }
+
 class DeepSeekAdapter(BaseLLMAdapter):
     """
     适配官方/OpenAI兼容接口（使用 langchain.ChatOpenAI）
     """
-    def __init__(self, api_key: str, base_url: str, model_name: str, max_tokens: int, temperature: float = 0.7, timeout: Optional[int] = 600):
+    def __init__(self, api_key: str, base_url: str, model_name: str, max_tokens: int, temperature: float = 0.7, timeout: Optional[int] = 600, extra_body: Optional[dict] = None):
         self.base_url = check_base_url(base_url)
         self.api_key = api_key
         self.model_name = model_name
@@ -57,11 +69,13 @@ class DeepSeekAdapter(BaseLLMAdapter):
             base_url=self.base_url,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            timeout=self.timeout
+            timeout=self.timeout,
+            extra_body=extra_body,
         )
 
     def invoke(self, prompt: str) -> str:
         response = self._client.invoke(prompt)
+        self._record_response(response)
         if not response:
             logging.warning("No response from DeepSeekAdapter.")
             return ""
@@ -91,6 +105,7 @@ class OpenAIAdapter(BaseLLMAdapter):
 
     def invoke(self, prompt: str) -> str:
         response = self._client.invoke(prompt)
+        self._record_response(response)
         if not response:
             logging.warning("No response from OpenAIAdapter.")
             return ""
@@ -406,7 +421,8 @@ def create_llm_adapter(
     """
     fmt = interface_format.strip().lower()
     if fmt == "deepseek":
-        return DeepSeekAdapter(api_key, base_url, model_name, max_tokens, temperature, timeout)
+        return DeepSeekAdapter(api_key, base_url, model_name, max_tokens, temperature, timeout,
+                               extra_body=extra_body)
     elif fmt == "openai":
         return OpenAIAdapter(api_key, base_url, model_name, max_tokens, temperature, timeout,
                              extra_body=extra_body)

@@ -2,11 +2,13 @@
 """工作台功能的 Web 路由；实际工作由 core 模块执行。"""
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Callable
+from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -19,6 +21,7 @@ from core.project_manager import (DEFAULT_PROJECT_SETTINGS, chapter_path, create
                                   load_project_settings, remove_project, save_project_settings,
                                   settings_for_chapter)
 from core.utils import read_file
+from core.plan_run_log import PlanRunLogger
 from web.jobs import JobStore
 
 
@@ -52,6 +55,10 @@ class ChapterSearchRequest(BaseModel):
     limit: int = 12
 
 
+class ChapterExportRequest(BaseModel):
+    numbers: list[int] = []
+
+
 class GenerateRequest(BaseModel):
     number: int
     model_name: str = ""
@@ -67,6 +74,7 @@ class ChapterRequest(BaseModel):
     text: str = ""
     revision: str = ""
     preview: dict = {}
+    revision_mode: Literal["local", "whole", "polish"] = "local"
 
 
 class MiscConfig(BaseModel):
@@ -78,6 +86,65 @@ class MiscConfig(BaseModel):
 
 class LocalPickerRequest(BaseModel):
     mode: str = "directory"
+
+
+def _planning_context(project_dir: str, settings: dict, chapter_number: int) -> str:
+    """用已有摘要、分幕与正文结尾生成不绑定题材的规划上下文。"""
+    from core.continuation import read_chapter_summary
+
+    previous_number = int(chapter_number) - 1
+    if previous_number < 1:
+        return ""
+    summaries = []
+    for number in range(max(1, previous_number - 2), previous_number + 1):
+        summary = read_chapter_summary(project_dir, number) or ""
+        if summary:
+            summaries.append((number, summary))
+
+    completed = []
+    end_states = []
+    plans = settings.get("chapter_plans") or {}
+    previous_plan = plans.get(str(previous_number), {}) if isinstance(plans, dict) else {}
+    for beat in previous_plan.get("beats") or []:
+        if not isinstance(beat, dict):
+            continue
+        name = str(beat.get("name") or "").strip()
+        desc = str(beat.get("desc") or "").strip()
+        if not desc:
+            continue
+        story = re.split(r"已知信息：|新增信息：|主要新增元素：|结尾状态：", desc, 1)[0]
+        story = re.sub(r"^【[^】]*】\s*", "", story).strip()
+        if story:
+            completed.append(f"- {name + '：' if name else ''}{story[:260]}")
+        marker = desc.find("结尾状态：")
+        if marker >= 0:
+            state = desc[marker + len("结尾状态："):].strip()
+            if state:
+                end_states.append(f"- {state[:300]}")
+
+    previous_body = read_file(chapter_path(project_dir, previous_number))
+    previous_tail = previous_body[-2400:]
+    blocks = []
+    latest_summary = next((text for number, text in reversed(summaries)
+                           if number == previous_number), "")
+    if latest_summary:
+        blocks.append("【上一章摘要】\n" + latest_summary)
+    older = [(number, text) for number, text in summaries if number != previous_number]
+    if older:
+        blocks.extend(f"【第{number}章摘要】\n{text}" for number, text in older)
+    if previous_body:
+        blocks.append(f"【第{previous_number}章正文开头定位】\n"
+                      "以下是上一章开头，只用于定位早期时间和起始状态；下一章须从正文结尾的最新状态承接，不从此处重演。\n"
+                      + previous_body[:600])
+    if previous_tail:
+        blocks.append("【上一章正文结尾】\n" + previous_tail)
+    if not latest_summary:
+        blocks.append("【上下文可用性提示】\n上一章没有有效摘要。正文开头与结尾为节选，未出现的信息不等于未发生；无法确定的日期使用相对时间，不猜测具体日期。")
+    if completed and not previous_body:
+        blocks.append("【上一章规划参考，非已发生事实】\n"
+                      "以下为写作前的计划，不能据此认定事件已发生或状态仍有效；与正文、摘要冲突时舍弃。\n"
+                      + "\n".join(completed)[:1200])
+    return "\n\n".join(blocks)
 
 
 def _write_required(marker: str | None = Header(None, alias="X-Novel-Workbench")):
@@ -337,45 +404,130 @@ def register_features(app: FastAPI, workspace_root: str,
 
     @app.post("/api/projects/{project_id}/plan", dependencies=[Depends(_write_required)])
     def suggest_plan(project_id: str, payload: ChapterRequest):
-        from core.continuation import ContinuationLLM, suggest_chapter_plan
-        from core.continuation import read_chapter_summary
+        from core.continuation import ContinuationLLM
+        from core.planning_workflow import run_planning_workflow, planning_fingerprint
+        from core.plan_run_log import PlanRunLogger
         path = project_path(project_id)
-        settings = settings_for_chapter(load_project_settings(path), payload.number)
+        project_settings = load_project_settings(path)
+        settings = settings_for_chapter(project_settings, payload.number)
         settings.update({key: value for key, value in payload.preview.items()
                          if key in ("background", "extra_requirements", "chapter_brief",
                                     "chapter_requirements", "beats_per_chapter")})
-        previous_summary = read_chapter_summary(path, payload.number - 1) or ""
-        previous_tail = read_file(chapter_path(path, payload.number - 1))[-2400:]
-        previous = (("【有效摘要】\n" + previous_summary + "\n") if previous_summary else "") + \
-            "【正文结尾】\n" + previous_tail
+        previous = _planning_context(path, project_settings, payload.number)
         from core.auto_wiki import wiki_context
         wiki = wiki_context(path, previous, before_chapter=payload.number)
-        return jobs.start(path, "plan", lambda update: (
-            update("正在规划章节") or suggest_chapter_plan(
-                settings, ContinuationLLM(llm(payload.model_name)),
-                int(settings.get("beats_per_chapter") or 6), previous, wiki)))
+        model_cfg = llm(payload.model_name)
+
+        def work(update, job_id):
+            audit = PlanRunLogger(
+                path, job_id, model_cfg.get("model_name", ""), payload.number,
+                secrets=(model_cfg.get("api_key", ""),))
+            update("已创建完整规划日志", {"log_path": str(audit.path)})
+            update("已启用 LangGraph 规划流程", {"workflow_thread": job_id,
+                   "model_name": payload.model_name, "chapter_number": payload.number})
+            try:
+                result = run_planning_workflow(
+                    path, job_id, ContinuationLLM(model_cfg), lambda message: update(message), audit,
+                    initial={"settings": settings, "chapter_number": payload.number,
+                             "model_name": payload.model_name,
+                             "num_beats": int(settings.get("beats_per_chapter") or 6),
+                             "previous_context": previous, "wiki_history": wiki,
+                             "fingerprint": planning_fingerprint(path, payload.number)})
+                audit.write("run_completed", result=result)
+                return {**result, "log_path": str(audit.path)}
+            except Exception as exc:
+                audit.write("run_failed", error_type=type(exc).__name__, error=str(exc))
+                raise
+
+        return jobs.start(path, "plan", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/plan/jobs/{job_id}/resume", dependencies=[Depends(_write_required)])
+    def resume_plan(project_id: str, job_id: str, payload: dict):
+        from core.continuation import ContinuationLLM
+        from core.planning_workflow import read_planning_checkpoint, run_planning_workflow, planning_fingerprint
+        path = project_path(project_id)
+        job = jobs.get(path, job_id)
+        if not job or job.get("kind") != "plan" or job.get("status") not in ("failed", "interrupted"):
+            raise HTTPException(400, "仅失败或中断的章节规划任务可恢复")
+        thread_id = next((event.get("data", {}).get("workflow_thread") for event in job.get("events", [])
+                          if event.get("data", {}).get("workflow_thread")), job_id)
+        try:
+            state = read_planning_checkpoint(path, thread_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if payload.get("model_name") != state["model_name"]:
+            raise HTTPException(400, "请确认原规划任务使用的模型")
+        if planning_fingerprint(path, state["chapter_number"]) != state["fingerprint"]:
+            raise HTTPException(409, "工程设定或近期正文、摘要已变化，请重新规划")
+        model_cfg = llm(state["model_name"])
+        def work(update, new_job_id):
+            audit = PlanRunLogger(path, new_job_id, model_cfg.get("model_name", ""),
+                                  state["chapter_number"], secrets=(model_cfg.get("api_key", ""),))
+            update("从 LangGraph 检查点继续规划", {"workflow_thread": thread_id,
+                   "model_name": state["model_name"], "chapter_number": state["chapter_number"],
+                   "log_path": str(audit.path)})
+            result = run_planning_workflow(path, thread_id, ContinuationLLM(model_cfg),
+                                           lambda message: update(message), audit)
+            audit.write("run_completed", result=result)
+            return {**result, "resumed": True}
+        return jobs.start(path, "plan", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/plan/jobs/{job_id}/apply", dependencies=[Depends(_write_required)])
+    def apply_recovered_plan(project_id: str, job_id: str):
+        from core.planning_workflow import read_planning_checkpoint, planning_fingerprint
+        path = project_path(project_id)
+        job = jobs.get(path, job_id)
+        if not job or job.get("kind") != "plan" or job.get("status") != "completed" or not (job.get("result") or {}).get("resumed"):
+            raise HTTPException(400, "仅完成的恢复规划可在此保存")
+        result = job["result"]
+        state = read_planning_checkpoint(path, result["workflow_thread"])
+        if planning_fingerprint(path, state["chapter_number"]) != state["fingerprint"]:
+            raise HTTPException(409, "工程设定或近期正文、摘要已变化，请核对后重新规划")
+        settings = load_project_settings(path)
+        number = state["chapter_number"]
+        plan = {key: state["settings"].get(key, "") for key in ("chapter_brief", "chapter_requirements")}
+        plan.update({key: result[key] for key in ("chapter_title", "beats", "planning_review")})
+        settings.setdefault("chapter_plans", {})[str(number)] = plan
+        if int(settings.get("chapter_number") or 0) == number:
+            settings.update({key: plan[key] for key in ("chapter_title", "beats")})
+        if not save_project_settings(path, settings):
+            raise HTTPException(500, "规划保存失败")
+        return {"chapter_number": number, "saved": True}
+
+    @app.get("/api/projects/{project_id}/plan/logs/{job_id}")
+    def plan_log(project_id: str, job_id: str):
+        from core.plan_run_log import read_plan_run_log
+        try:
+            return {"id": job_id, "entries": read_plan_run_log(
+                project_path(project_id), job_id)}
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(404, "规划日志不存在")
 
     @app.post("/api/projects/{project_id}/plan/revise", dependencies=[Depends(_write_required)])
     def revise_plan(project_id: str, payload: ChapterRequest):
-        from core.continuation import ContinuationLLM, read_chapter_summary, revise_chapter_plan
+        from core.continuation import ContinuationLLM, revise_chapter_plan
         from core.auto_wiki import wiki_context
         path = project_path(project_id)
-        settings = settings_for_chapter(load_project_settings(path), payload.number)
+        project_settings = load_project_settings(path)
+        settings = settings_for_chapter(project_settings, payload.number)
         settings.update({key: value for key, value in payload.preview.items()
                          if key in ("background", "extra_requirements", "chapter_brief",
                                     "chapter_requirements", "beats_per_chapter",
                                     "chapter_title", "beats")})
         current_beats = settings.get("beats") or []
         num_beats = len(current_beats) or int(settings.get("beats_per_chapter") or 6)
-        previous_summary = read_chapter_summary(path, payload.number - 1) or ""
-        previous_tail = read_file(chapter_path(path, payload.number - 1))[-2400:]
-        previous = ((("【有效摘要】\n" + previous_summary + "\n") if previous_summary else "") +
-                    "【正文结尾】\n" + previous_tail)
+        previous = _planning_context(path, project_settings, payload.number)
         wiki = wiki_context(path, previous, before_chapter=payload.number)
-        return jobs.start(path, "plan_revision", lambda update: (
-            update("正在按问题修订章节规划") or revise_chapter_plan(
-                settings, ContinuationLLM(llm(payload.model_name)), num_beats,
-                payload.requirements, previous, wiki)))
+        model_cfg = llm(payload.model_name)
+        def work(update, job_id):
+            audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""),
+                                  payload.number, secrets=(model_cfg.get("api_key", ""),))
+            update("正在使用规划 Skill 按问题修订", {"log_path": str(audit.path),
+                   "model_name": model_cfg.get("model_name", "")})
+            return revise_chapter_plan(settings, ContinuationLLM(model_cfg), num_beats,
+                                       payload.requirements, previous, wiki,
+                                       progress=lambda message: update(message), audit=audit)
+        return jobs.start(path, "plan_revision", work, pass_job_id=True)
 
     @app.post("/api/projects/{project_id}/book-rules", dependencies=[Depends(_write_required)])
     def suggest_rules(project_id: str, payload: ChapterRequest):
@@ -701,40 +853,66 @@ def register_features(app: FastAPI, workspace_root: str,
 
     @app.post("/api/projects/{project_id}/revise", dependencies=[Depends(_write_required)])
     def revise(project_id: str, payload: ChapterRequest):
-        from core.chapter_revision import (build_whole_chapter_prompt,
-                                           check_chapter_candidate, chapter_body,
-                                           review_candidate_requirements)
-        from core.continuation import ContinuationLLM, clean_text
+        from core.chapter_revision import chapter_body
+        from core.continuation import ContinuationLLM
+        from core.revision_workflow import run_revision_workflow
         path, chapter_file = existing_chapter(project_id, payload.number)
         source_file = chapter_file.read_text(encoding="utf-8")
         source = chapter_body(payload.text or source_file, source_file.splitlines()[0])
-        if not payload.requirements.strip():
+        requirements = payload.requirements
+        if payload.revision_mode == "polish":
+            from core.prose_polish import polish_requirements
+            requirements = polish_requirements(requirements)
+        if not requirements.strip():
             raise HTTPException(400, "请填写修订要求")
         model_cfg = llm(payload.model_name)
         settings = settings_for_chapter(load_project_settings(path), payload.number)
         title = source_file.splitlines()[0]
 
-        def work(update):
-            prompt = build_whole_chapter_prompt(source, title, settings, payload.requirements)
-            model = ContinuationLLM(model_cfg)
-            for attempt in range(2):
-                update(f"正在生成修订建议（第 {attempt + 1} 次）")
-                candidate = clean_text(model.complete(
-                    prompt, system="你是严谨的小说编辑。只输出修订后的完整章节正文。",
-                    temperature=0.3, num_predict=max(4096, int(len(source) * 1.9))), settings)
-                issues = check_chapter_candidate(candidate, source, payload.requirements, settings)
-                if not issues:
-                    update("正在逐项核对修订要求")
-                    issues = review_candidate_requirements(
-                        model, candidate, payload.requirements, settings)
-                if not issues:
-                    break
-                prompt += "\n【上次未通过】\n" + "；".join(issues[:6])
-            return {"chapter_number": payload.number, "candidate": candidate,
-                    "issues": issues, "source": source,
-                    "requirements": payload.requirements}
+        def work(update, job_id):
+            audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""),
+                                  payload.number, secrets=(model_cfg.get("api_key", ""),))
+            update("已创建完整修订日志", {"log_path": str(audit.path)})
+            update("已启用 LangGraph 修订流程", {"workflow_thread": job_id,
+                   "model_name": payload.model_name, "chapter_number": payload.number})
+            return run_revision_workflow(path, job_id, ContinuationLLM(model_cfg), update, audit,
+                initial={"source": source, "title": title, "requirements": requirements,
+                         "settings": settings, "chapter_number": payload.number,
+                         "model_name": payload.model_name, "attempt": 0,
+                         "revision_mode": payload.revision_mode})
 
-        return jobs.start(path, "revise", work)
+        return jobs.start(path, "revise", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/revisions/{job_id}/resume", dependencies=[Depends(_write_required)])
+    def resume_revision(project_id: str, job_id: str, payload: dict):
+        from core.revision_workflow import read_revision_checkpoint, run_revision_workflow
+        from core.continuation import ContinuationLLM
+        from core.chapter_revision import chapter_body
+        path = project_path(project_id)
+        job = jobs.get(path, job_id)
+        if not job or job.get("kind") != "revise" or job.get("status") not in ("failed", "interrupted"):
+            raise HTTPException(400, "仅失败或中断的修订任务可恢复")
+        thread_id = next((event.get("data", {}).get("workflow_thread") for event in job.get("events", [])
+                          if event.get("data", {}).get("workflow_thread")), job_id)
+        try:
+            state = read_revision_checkpoint(path, thread_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if payload.get("model_name") != state["model_name"]:
+            raise HTTPException(400, "请确认原修订任务使用的模型")
+        _, chapter_file = existing_chapter(project_id, state["chapter_number"])
+        current = chapter_file.read_text(encoding="utf-8")
+        if chapter_body(current, current.splitlines()[0]) != state["source"]:
+            raise HTTPException(409, "正文已变化或原任务使用了未保存的编辑内容，请重新生成建议稿")
+        model_cfg = llm(state["model_name"])
+        def work(update, new_job_id):
+            audit = PlanRunLogger(path, new_job_id, model_cfg.get("model_name", ""),
+                                  state["chapter_number"], secrets=(model_cfg.get("api_key", ""),))
+            update("从 LangGraph 检查点继续修订", {"workflow_thread": thread_id,
+                   "model_name": state["model_name"], "chapter_number": state["chapter_number"],
+                   "log_path": str(audit.path)})
+            return run_revision_workflow(path, thread_id, ContinuationLLM(model_cfg), update, audit)
+        return jobs.start(path, "revise", work, pass_job_id=True)
 
     @app.post("/api/projects/{project_id}/revise/check", dependencies=[Depends(_write_required)])
     def check_revision(project_id: str, payload: ChapterRequest):
@@ -750,6 +928,7 @@ def register_features(app: FastAPI, workspace_root: str,
     @app.post("/api/projects/{project_id}/consistency", dependencies=[Depends(_write_required)])
     def consistency(project_id: str, payload: ChapterRequest):
         from core.consistency import check_consistency
+        from core.plan_run_log import PlanRunLogger
         from core.continuation import read_chapter_summary, retrieve_context_for_beat
         from core.auto_wiki import wiki_context
         path, chapter_file = existing_chapter(project_id, payload.number)
@@ -770,27 +949,33 @@ def register_features(app: FastAPI, workspace_root: str,
                 blocks.append("【章末原文（时间晚于本章前部内容）】\n" + tail)
             previous_context = "\n\n".join(blocks)
         if not payload.model_name:
-            raise HTTPException(400, "一致性审校需要选择大模型")
+            raise HTTPException(400, "故事审校需要选择大模型")
         model_cfg = llm(payload.model_name)
         embedding = get_embedding_config(cfg())
 
-        def work(update):
+        def work(update, job_id):
+            audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""),
+                                  payload.number, secrets=(model_cfg.get("api_key", ""),))
+            update("已创建完整审校日志", {"log_path": str(audit.path)})
             update("正在整理上一章与补充证据")
             retrieved = retrieve_context_for_beat(
                 path, embedding, text[:200], int(embedding.get("retrieval_k", 4) or 4),
                 glossary=settings.get("glossary") or {}, source_query=text[:200],
                 corpus_is_english=bool(settings.get("corpus_is_english")),
                 glossary_hard_terms=settings.get("glossary_hard_terms") or [])
-            update("正在进行 LLM 审校")
-            return {"chapter_number": payload.number,
-                    "report": check_consistency(
+            update("正在进行故事审校：主线逻辑与可选情节增强")
+            result = check_consistency(
                         text, settings, retrieved, model_cfg,
-                        previous_context=previous_context, wiki_history=wiki),
+                        previous_context=previous_context, wiki_history=wiki,
+                        progress=update, audit=audit, structured=True,
+                        project_dir=path, chapter_number=payload.number)
+            return {"chapter_number": payload.number, **result,
+                    "log_path": str(audit.path),
                     "retrieved_chars": len(retrieved),
                     "previous_context_chars": len(previous_context),
                     "wiki_chars": len(wiki)}
 
-        return jobs.start(path, "consistency", work)
+        return jobs.start(path, "consistency", work, pass_job_id=True)
 
     @app.get("/api/projects/{project_id}/chapters/{number}/illustration")
     def get_chapter_illustration(project_id: str, number: int):
@@ -841,6 +1026,34 @@ def register_features(app: FastAPI, workspace_root: str,
         target = Path(path) / "exports" / f"chapter_{number}.docx"
         if not target.is_file():
             raise HTTPException(404, "请先生成 Word 文件")
+        return FileResponse(target, filename=target.name)
+
+    @app.post("/api/projects/{project_id}/exports/chapters",
+              dependencies=[Depends(_write_required)])
+    def export_selected_chapters(project_id: str, payload: ChapterExportRequest):
+        from core.chapter_export import export_chapters_docx
+        from core.chapter_illustration import illustration_path
+        path = project_path(project_id)
+        numbers = sorted(set(payload.numbers))
+        if not numbers or any(number < 1 for number in numbers):
+            raise HTTPException(400, "请至少选择一个有效章节")
+        selected = []
+        for number in numbers:
+            _, chapter_file = existing_chapter(project_id, number)
+            text = chapter_file.read_text(encoding="utf-8")
+            title, _, body = text.partition("\n")
+            image = illustration_path(path, number)
+            selected.append({"number": number, "title": title, "body": body,
+                             "illustration_svg": image.read_text(encoding="utf-8")
+                             if image.is_file() else None})
+        target = Path(path) / "exports" / "selected_chapters.docx"
+        return export_chapters_docx(selected, str(target))
+
+    @app.get("/api/projects/{project_id}/exports/chapters")
+    def download_selected_chapters(project_id: str):
+        target = Path(project_path(project_id)) / "exports" / "selected_chapters.docx"
+        if not target.is_file():
+            raise HTTPException(404, "请先生成多章 Word 文件")
         return FileResponse(target, filename=target.name)
 
     @app.get("/api/projects/{project_id}/jobs")

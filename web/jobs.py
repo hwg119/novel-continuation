@@ -10,10 +10,23 @@ import uuid
 from pathlib import Path
 
 
+class JobConflictError(ValueError):
+    """任务占用同一处理流程或共享写入资源。"""
+
+
+def task_resources(kind: str) -> set[str]:
+    if kind in {"vectors", "chapter_vector", "generate"}:
+        return {"vectors"}
+    if kind in {"plan", "plan_revision"}:
+        return {"plan"}
+    return {kind}
+
+
 class JobStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._active: set[tuple[str, str]] = set()
+        self._resources: dict[tuple[str, str], set[str]] = {}
 
     @staticmethod
     def _directory(project_dir: str) -> Path:
@@ -70,11 +83,14 @@ class JobStore:
         return jobs[:limit]
 
     def start(self, project_dir: str, kind: str, work, *, pass_job_id: bool = False) -> dict:
+        resources = task_resources(kind)
         with self._lock:
-            if any(path == project_dir for path, _ in self._active):
-                raise ValueError("该工程已有运行中的任务，请等待完成。")
+            for key, occupied in self._resources.items():
+                if key[0] == project_dir and ("corpus" in resources or "corpus" in occupied or resources & occupied):
+                    raise JobConflictError("该处理流程或共享写入资源已有运行中的任务，请等待完成；其他独立流程可同时执行。")
             job_id = time.strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
             self._active.add((project_dir, job_id))
+            self._resources[(project_dir, job_id)] = resources
         job = {"id": job_id, "kind": kind, "status": "running", "message": "已开始",
                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"), "events": [], "result": None}
         try:
@@ -82,11 +98,12 @@ class JobStore:
         except Exception:
             with self._lock:
                 self._active.discard((project_dir, job_id))
+                self._resources.pop((project_dir, job_id), None)
             raise
 
-        def update(message: str, data: dict | None = None):
+        def update(message: str, data: dict | None = None, *, level: str = "info"):
             event = {"time": time.strftime("%H:%M:%S"), "message": message,
-                     "data": data or {}}
+                     "data": data or {}, "level": level}
             job["events"].append(event)
             job["events"] = job["events"][-150:]
             job["message"] = message
@@ -97,16 +114,17 @@ class JobStore:
                 result = work(update, job_id) if pass_job_id else work(update)
                 job["result"] = result
                 job["status"] = "completed"
-                update("任务完成")
+                update("任务完成", level="success")
             except Exception as exc:
                 job["status"] = "failed"
                 try:
-                    update(f"任务失败：{exc}")
+                    update(f"任务失败：{exc}", level="error")
                 except Exception:
                     logging.exception("无法写入后台任务失败状态：%s", job_id)
             finally:
                 with self._lock:
                     self._active.discard((project_dir, job_id))
+                    self._resources.pop((project_dir, job_id), None)
 
         threading.Thread(target=runner, daemon=True).start()
         return {"id": job_id, "kind": kind, "status": "running"}

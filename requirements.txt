@@ -1,5 +1,7 @@
 langchain==0.3.27
 langchain-openai==0.3.32
+langgraph==1.0.1
+langgraph-checkpoint-sqlite==3.0.3
 faiss-cpu==1.15.1
 numpy==2.3.2
 openai==1.106.1

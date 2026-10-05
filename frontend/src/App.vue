@@ -29,6 +29,7 @@ type Tab = 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' |
 type GenerationRequest = { number: number; title: string; beatsLimit: number | null }
 type PendingGeneration = { request: GenerationRequest; overwrite: boolean; modelName: string }
 type NavItem = { id: Tab; label: string; icon: string }
+type BookBookmark = { paragraph: number; savedAt: string }
 
 const navGroups: { label: string; items: NavItem[] }[] = [
   { label: '概览', items: [
@@ -52,6 +53,8 @@ const configNav: NavItem = { id: 'config', label: '全局配置', icon: 'M12 9a3
 const activeTab = ref<Tab>('home')
 const projects = ref<Project[]>([])
 const chapters = ref<Chapter[]>([])
+const selectedExportChapters = ref<number[]>([])
+const exportingChapters = ref(false)
 const projectId = ref('')
 const chapterNumber = ref<number | null>(null)
 const text = ref('')
@@ -60,6 +63,21 @@ const revision = ref('')
 const chapterSummary = ref<ChapterSummary | null>(null)
 const chapterIllustration = ref('')
 const readingMode = ref<'original' | 'learning'>('original')
+const bookMode = ref(false)
+const bookIndexOpen = ref(false)
+const BOOK_FONT_SIZE_KEY = 'novel-continuation:book-font-size'
+const bookFontSizes = [16, 17, 18, 19, 20, 22, 24]
+const savedBookFontSize = Number(window.localStorage.getItem(BOOK_FONT_SIZE_KEY))
+const bookFontSize = ref(bookFontSizes.includes(savedBookFontSize) ? savedBookFontSize : 18)
+const BOOKMARKS_KEY = 'novel-continuation:book-bookmarks'
+const bookReader = ref<HTMLElement | null>(null)
+function loadBookBookmarks(): Record<string, BookBookmark> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(BOOKMARKS_KEY) || '{}')
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch { return {} }
+}
+const bookBookmarks = ref<Record<string, BookBookmark>>(loadBookBookmarks())
 const illustrationLoading = ref(false)
 const summaryBusy = ref(false)
 const settingsChapter = ref<number | null>(null)
@@ -99,6 +117,8 @@ watch(message, value => {
   toast.success(value)
   message.value = ''
 })
+watch(bookFontSize, value => window.localStorage.setItem(BOOK_FONT_SIZE_KEY, String(value)))
+watch(bookBookmarks, value => window.localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(value)), { deep: true })
 watch([activeTab, chapterNumber, text], async () => {
   await nextTick()
   resizeManuscript()
@@ -111,6 +131,55 @@ const title = computed(() => text.value.split(/\r?\n/, 1)[0]?.trim() || '未命�
 const chapterTitles = computed(() => new Map(chapters.value.map(item => [item.number, item.title])))
 const chapterIllustrationUrl = computed(() => chapterIllustration.value
   ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(chapterIllustration.value)}` : '')
+const bookParagraphs = computed(() => {
+  const lines = text.value.replace(/\r\n/g, '\n').split('\n')
+  const firstContent = lines.findIndex(line => line.trim())
+  if (firstContent >= 0 && lines[firstContent].trim() === title.value) lines.splice(firstContent, 1)
+  return lines.join('\n').trim().split(/\n+/).map(item => item.trim()).filter(Boolean)
+})
+const orderedChapterNumbers = computed(() => chapters.value.map(item => item.number).sort((a, b) => a - b))
+const previousChapter = computed(() => {
+  const index = orderedChapterNumbers.value.indexOf(chapterNumber.value || -1)
+  return index > 0 ? orderedChapterNumbers.value[index - 1] : null
+})
+const nextChapter = computed(() => {
+  const index = orderedChapterNumbers.value.indexOf(chapterNumber.value || -1)
+  return index >= 0 && index < orderedChapterNumbers.value.length - 1 ? orderedChapterNumbers.value[index + 1] : null
+})
+const bookmarkKey = computed(() => `${projectId.value}:${chapterNumber.value || 0}`)
+const currentBookmark = computed(() => bookBookmarks.value[bookmarkKey.value] || null)
+
+function enterBookMode() { readingMode.value = 'original'; bookIndexOpen.value = false; bookMode.value = true }
+function leaveBookMode() { bookMode.value = false; bookIndexOpen.value = false }
+function saveBookBookmark() {
+  const paragraphs = Array.from(bookReader.value?.querySelectorAll<HTMLElement>('[data-book-paragraph]') || [])
+  const readingLine = window.innerHeight * 0.5
+  const elementAtReadingLine = document.elementFromPoint(window.innerWidth * 0.5, readingLine)
+    ?.closest<HTMLElement>('[data-book-paragraph]')
+  let paragraph = Number(elementAtReadingLine?.dataset.bookParagraph ?? -1)
+  if (!Number.isInteger(paragraph) || paragraph < 0) {
+    paragraph = 0
+    for (let index = 0; index < paragraphs.length; index += 1) {
+      const bounds = paragraphs[index].getBoundingClientRect()
+      if (bounds.top <= readingLine) paragraph = index
+      else break
+    }
+  }
+  bookBookmarks.value[bookmarkKey.value] = { paragraph, savedAt: new Date().toISOString() }
+  toast.success(`已记录第 ${paragraph + 1} 段的阅读位置`)
+}
+async function goToBookBookmark() {
+  if (!currentBookmark.value) return
+  await nextTick()
+  bookReader.value?.querySelector<HTMLElement>(`[data-book-paragraph="${currentBookmark.value.paragraph}"]`)
+    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+function removeBookBookmark() {
+  const next = { ...bookBookmarks.value }
+  delete next[bookmarkKey.value]
+  bookBookmarks.value = next
+  toast.success('本章书签已移除')
+}
 
 function clearChapterSearch() {
   searchQuery.value = ''; searchResults.value = []; searchDone.value = false; searchError.value = ''
@@ -202,6 +271,8 @@ async function loadConfig() {
 async function loadChapters(selectLast = false) {
   if (!projectId.value) return
   chapters.value = await api<Chapter[]>(`/api/projects/${projectId.value}/chapters`)
+  selectedExportChapters.value = selectedExportChapters.value.filter(number =>
+    chapters.value.some(item => item.number === number))
   generationNumber.value = (chapters.value.at(-1)?.number || 0) + 1
   if (selectLast && chapters.value.length) await chooseChapter(chapters.value.at(-1)!.number)
 }
@@ -215,6 +286,7 @@ async function chooseProject(id: string) {
   if (dirty.value && !restoringRoute && !await askConfirm({ title: '切换到其他工程？',
     message: '当前章节尚未保存，继续后这些修改将丢失。', symbol: '换', confirmLabel: '放弃修改并切换' })) return
   error.value = ''; message.value = ''; projectId.value = id; chapterNumber.value = null
+  selectedExportChapters.value = []
   text.value = baseline.value = ''; chapterIllustration.value = ''
   clearChapterSearch()
   try { await loadChapters(true); await loadWikiPending(id) } catch (cause) { error.value = String(cause) }
@@ -340,8 +412,28 @@ async function exportWord() {
     message.value = 'Word 已生成并开始下载。' }
   catch (cause) { error.value = String(cause) }
 }
+function toggleAllExportChapters() {
+  selectedExportChapters.value = selectedExportChapters.value.length === chapters.value.length
+    ? [] : chapters.value.map(item => item.number)
+}
+async function exportSelectedChapters() {
+  if (!projectId.value || !selectedExportChapters.value.length || exportingChapters.value) return
+  if (dirty.value) { error.value = '请先保存当前正文，再导出多章 Word。'; return }
+  exportingChapters.value = true
+  try {
+    await api(`/api/projects/${projectId.value}/exports/chapters`,
+      writeOptions('POST', { numbers: selectedExportChapters.value }))
+    window.location.href = `/api/projects/${projectId.value}/exports/chapters`
+    message.value = `已合并 ${selectedExportChapters.value.length} 章并开始下载。`
+  } catch (cause) { error.value = String(cause) }
+  finally { exportingChapters.value = false }
+}
 function openSettings(number: number) { settingsChapter.value = number; activeTab.value = 'settings' }
-function switchTab(tab: Tab) { if (tab === 'settings') settingsChapter.value = null; activeTab.value = tab }
+function switchTab(tab: Tab) {
+  leaveBookMode()
+  if (tab === 'settings') settingsChapter.value = null
+  activeTab.value = tab
+}
 async function openChapter(number: number) { if (await chooseChapter(number)) activeTab.value = 'write' }
 function applyRevision(candidate: string) { text.value = candidate; activeTab.value = 'write' }
 async function openWikiChapter(number: number) { if (await chooseChapter(number)) activeTab.value = 'write' }
@@ -403,6 +495,7 @@ async function initialize() {
   void loadConfig()
 }
 function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && bookMode.value) { leaveBookMode(); return }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault(); void save()
   }
@@ -416,7 +509,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('resize', resizeManuscript) })
 </script>
 
-<template><div class="shell"><aside class="sidebar">
+<template><div class="shell" :class="{ 'book-mode': bookMode }"><aside class="sidebar">
   <div class="brand"><span class="brand-mark">续</span><div><strong>续写工作台</strong><small>长篇小说 · 本机工程</small></div></div>
   <div class="project-switcher"><label for="project">当前工程</label><span>{{ chapters.length }} 章<span v-if="wikiPendingCount"> · Wiki 待更新 {{ wikiPendingCount }}</span></span>
     <select id="project" :value="projectId" @change="switchProject">
@@ -433,7 +526,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
     <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="configNav.icon" /></svg><span>{{ configNav.label }}</span></button>
     <div class="side-foot">本机运行 · 数据保留在原工程目录</div></div>
 </aside><main class="main" :class="{ 'console-visible': consoleLayout.visible, 'console-expanded': consoleLayout.expanded }">
-  <header class="toolbar"><div class="crumb">{{ project?.name || '请选择工程' }} <span v-if="chapterNumber !== null">/ 第 {{ chapterNumber }} 章</span></div>
+  <header v-if="!bookMode" class="toolbar"><div class="crumb">{{ project?.name || '请选择工程' }} <span v-if="chapterNumber !== null">/ 第 {{ chapterNumber }} 章</span></div>
     <div class="toolbar-actions"><label class="model-picker">模型 <select v-model="modelName"><option v-for="name in models" :key="name">{{ name }}</option></select></label>
       <span class="save-state" :class="{ unsaved: dirty }">{{ dirty ? '未保存修改' : '已同步' }}</span>
       <button type="button" class="save-button" :disabled="!dirty || busy" @click="save">{{ busy ? '保存中…' : '保存章节' }}</button></div></header>
@@ -441,13 +534,24 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
     :chapters="chapters" :model-name="modelName" :wiki-pending-count="wikiPendingCount" :generating="generating"
     @generate="generate" @settings="openSettings" @chapter="openChapter" @navigate="switchTab" />
   <template v-else-if="activeTab === 'write'"><div class="reading-layout">
-    <aside class="reading-index" aria-label="本书章节目录"><div class="reading-index-head"><strong>章节目录</strong><span>{{ chapters.length }} 章</span></div>
-      <nav class="reading-chapters" aria-label="小说章节"><button v-for="item in [...chapters].reverse()" :key="item.number" type="button"
+    <aside class="reading-index" :class="{ open: bookIndexOpen }" aria-label="本书章节目录"><div class="reading-index-head"><strong>章节目录</strong><span>{{ chapters.length }} 章</span><button v-if="bookMode" type="button" aria-label="关闭章节目录" @click="bookIndexOpen = false">×</button></div>
+      <div v-if="!bookMode && chapters.length" class="chapter-export-tools"><button type="button" @click="toggleAllExportChapters">{{ selectedExportChapters.length === chapters.length ? '清空' : '全选' }}</button><span>已选 {{ selectedExportChapters.length }} 章</span><button type="button" class="chapter-export-submit" :disabled="!selectedExportChapters.length || exportingChapters" @click="exportSelectedChapters">{{ exportingChapters ? '生成中…' : '合并导出' }}</button></div>
+      <nav class="reading-chapters" aria-label="小说章节"><div v-for="item in [...chapters].reverse()" :key="item.number" class="reading-chapter-row"><label v-if="!bookMode" class="chapter-export-check" :aria-label="`选择第 ${item.number} 章导出`"><input v-model="selectedExportChapters" type="checkbox" :value="item.number"></label><button type="button"
         class="reading-chapter" :class="{ active: item.number === chapterNumber }" :aria-current="item.number === chapterNumber ? 'page' : undefined"
-        @click="chooseChapter(item.number)"><span>第 {{ item.number }} 章</span></button>
+        @click="chooseChapter(item.number)"><span>第 {{ item.number }} 章</span></button></div>
         <p v-if="!chapters.length" class="reading-empty">暂无章节。请先导入母本，或生成新章。</p></nav></aside>
     <div class="editor-wrap">
-    <section class="story-search" :class="{ expanded: searchDone || searchBusy }" aria-labelledby="story-search-title">
+    <nav v-if="bookMode" class="book-toolbar" aria-label="看书模式工具栏">
+      <button type="button" @click="bookIndexOpen = !bookIndexOpen">目录</button>
+      <span>第 {{ chapterNumber }} 章</span>
+      <div><button type="button" class="book-chapter-nav" :disabled="previousChapter === null" @click="previousChapter !== null && chooseChapter(previousChapter)">上一章</button><button type="button" class="book-chapter-nav" :disabled="nextChapter === null" @click="nextChapter !== null && chooseChapter(nextChapter)">下一章</button><label class="book-font-picker">字号<select v-model.number="bookFontSize" aria-label="看书模式正文字号"><option v-for="size in bookFontSizes" :key="size" :value="size">{{ size }}</option></select></label><button type="button" class="book-exit" @click="leaveBookMode">退出看书模式</button></div>
+    </nav>
+    <aside v-if="bookMode" class="book-bookmark-dock" aria-label="阅读书签">
+      <button type="button" class="book-bookmark-save" @click="saveBookBookmark"><b>签</b><span>{{ currentBookmark ? '更新书签' : '加书签' }}</span></button>
+      <button v-if="currentBookmark" type="button" class="book-bookmark-return" @click="goToBookBookmark"><b>返</b><span>回到书签</span></button>
+      <button v-if="currentBookmark" type="button" class="book-bookmark-remove" @click="removeBookBookmark"><b>×</b><span>移除</span></button>
+    </aside>
+    <section v-if="!bookMode" class="story-search" :class="{ expanded: searchDone || searchBusy }" aria-labelledby="story-search-title">
       <div class="story-search-intro"><span>全书语义检索 · {{ chapters.length }} 章</span><h2 id="story-search-title">沿着一句话，找回故事里的线索。</h2>
         <p>不必记得原句。输入人物、事件、场景或一段模糊记忆，向量检索会从整部小说中找到语义相近的正文。</p></div>
       <form class="story-search-form" role="search" @submit.prevent="searchChapters">
@@ -466,16 +570,16 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
           </article></div><p v-if="!searchResults.length" class="story-search-state">没有找到相关片段。换一种叙述方式，或检查向量库是否覆盖了目标章节。</p></template>
       </div>
     </section>
-    <template v-if="chapterNumber !== null"><div class="editor-meta"><span>第 {{ chapterNumber }} 章</span><span>{{ readingMode === 'original' ? `${wordCount.toLocaleString('zh-CN')} 字 · Ctrl+S 保存` : '分级双语阅读' }}</span></div>
-      <div class="reading-mode-switch" role="tablist" aria-label="正文阅读模式"><button role="tab" :aria-selected="readingMode === 'original'" :class="{ active: readingMode === 'original' }" @click="readingMode = 'original'">原文与编辑</button><button role="tab" :aria-selected="readingMode === 'learning'" :class="{ active: readingMode === 'learning' }" @click="readingMode = 'learning'">英语学习版</button></div>
+    <template v-if="chapterNumber !== null"><div v-if="!bookMode" class="editor-meta"><span>第 {{ chapterNumber }} 章</span><span>{{ readingMode === 'original' ? `${wordCount.toLocaleString('zh-CN')} 字 · Ctrl+S 保存` : '分级双语阅读' }}</span></div>
+      <div v-if="!bookMode" class="reading-view-row"><div class="reading-mode-switch" role="tablist" aria-label="正文阅读模式"><button role="tab" :aria-selected="readingMode === 'original'" :class="{ active: readingMode === 'original' }" @click="readingMode = 'original'">原文与编辑</button><button role="tab" :aria-selected="readingMode === 'learning'" :class="{ active: readingMode === 'learning' }" @click="readingMode = 'learning'">英语学习版</button></div><button type="button" class="enter-book-mode" @click="enterBookMode">看书模式</button></div>
       <h1>{{ title }}</h1>
       <figure v-if="chapterIllustrationUrl" class="chapter-front-illustration"><img :src="chapterIllustrationUrl" :alt="`第 ${chapterNumber} 章插图`"><figcaption>本章插图</figcaption></figure>
       <div v-else-if="illustrationLoading" class="chapter-front-illustration loading" aria-live="polite">正在载入本章插图…</div>
-      <template v-if="readingMode === 'original'"><div class="manuscript"><div class="manuscript-rule" aria-hidden="true"></div><textarea ref="manuscriptEditor" v-model="text" spellcheck="false" aria-label="章节全文"></textarea></div>
-      <div class="editor-actions"><button class="subtle" :disabled="dirty" @click="exportWord">导出 Word</button>
+      <template v-if="readingMode === 'original'"><article v-if="bookMode" ref="bookReader" class="book-reader" :style="{ fontSize: `${bookFontSize}px` }" aria-label="章节正文"><p v-for="(paragraph, index) in bookParagraphs" :key="index" :data-book-paragraph="index" :class="{ bookmarked: currentBookmark?.paragraph === index }">{{ paragraph }}</p></article><div v-else class="manuscript"><div class="manuscript-rule" aria-hidden="true"></div><textarea ref="manuscriptEditor" v-model="text" spellcheck="false" aria-label="章节全文"></textarea></div>
+      <div v-if="!bookMode" class="editor-actions"><button class="subtle" :disabled="dirty" @click="exportWord">导出 Word</button>
         <button class="subtle" @click="activeTab = 'revision'">查看修订稿／高亮对照</button>
         <button class="subtle" @click="activeTab = 'quality'">整章修订／审校</button></div>
-      <section class="chapter-summary-card" :class="{ invalid: chapterSummary && !chapterSummary.valid }">
+      <section v-if="!bookMode" class="chapter-summary-card" :class="{ invalid: chapterSummary && !chapterSummary.valid }">
         <div class="chapter-summary-head"><div><span class="eyebrow">章节摘要 · 第 {{ chapterNumber }} 章</span><h2>下一章规划的承接依据</h2></div>
           <span class="summary-state" :class="{ valid: chapterSummary?.valid, invalid: chapterSummary && !chapterSummary.valid }">{{ chapterSummary?.valid ? '可用' : chapterSummary?.exists ? '需重新生成' : '尚未生成' }}</span></div>
         <p v-if="chapterSummary?.text" class="chapter-summary-text">{{ chapterSummary.text }}</p>
@@ -494,7 +598,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <RelationGraphPanel v-else-if="activeTab === 'relationships'" :project-id="projectId" :current-chapter="chapterNumber" @back="activeTab = 'wiki'" @open-chapter="openWikiChapter" @open-subject="wikiFocusSubject = $event; activeTab = 'wiki'" />
   <RunsPanel v-else-if="activeTab === 'runs'" :project-id="projectId" :focus-job="focusJob" />
   <ConfigPanel v-else :key="activeTab" @changed="loadConfig" />
-  <TaskDrawer :project-id="projectId" :focus-job="focusJob" @view="activeTab = 'runs'" @layout="consoleLayout = $event" />
+  <TaskDrawer v-if="!bookMode" :project-id="projectId" :focus-job="focusJob" @view="activeTab = 'runs'" @layout="consoleLayout = $event" />
   <ConfirmDialog dialog-id="generation-confirm" :open="Boolean(pendingGeneration)"
     :symbol="pendingGeneration?.overwrite ? '覆' : '写'"
     :title="pendingGeneration?.overwrite ? '确认覆盖并续写？' : '确认开始续写？'"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按次保存续写运行记录；默认不落盘完整 prompt 或生成正文。"""
+"""按次保存续写运行记录，包括 Skill 版本、请求、回复与处理结果。"""
 import json
 import os
 import threading

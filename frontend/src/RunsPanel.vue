@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, type Job } from './api'
+import { api, writeOptions, type Job } from './api'
+import { askConfirm } from './confirmService'
 
 type GenerationLog = { id: string; chapter: number | null; title: string; created_at: string; events_count: number }
 type LogEvent = Record<string, unknown>
@@ -13,11 +14,14 @@ const logEvents = ref<LogEvent[]>([])
 const wikiEntries = ref<LogEvent[]>([])
 const wikiLoading = ref(false)
 const wikiOpened = ref(false)
+const planOpened = ref(false)
 const error = ref('')
+const resuming = ref(false)
+const savedPlanJob = ref('')
 let timer: ReturnType<typeof setInterval> | null = null
 
 const jobTitles: Record<string, string> = {
-  generate: '章节续写', revise: '整章修订', consistency: '一致性审校',
+  generate: '章节续写', revise: '整章修订', consistency: '故事审校',
   vectors: '构建向量库', chapter_vector: '更新章节向量', corpus: '导入母本', wiki: '编纂 Wiki',
   plan: '章节规划', plan_revision: '按问题修订分幕',
   book_rules: '全书规则提取', model_test: '模型连接测试',
@@ -53,6 +57,35 @@ const records = computed<RecordItem[]>(() => [
 ].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)))
 const selectedJob = computed(() => selected.value?.type === 'job'
   ? jobs.value.find(job => job.id === selected.value?.id) : undefined)
+const resumeModel = computed(() => String(selectedJob.value?.events.find(event => event.data?.workflow_thread)?.data?.model_name || ''))
+async function resumeRevision() {
+  const job = selectedJob.value
+  if (!job || resuming.value || !resumeModel.value) return
+  const isPlan = job.kind === 'plan'
+  if (!await askConfirm({ title: isPlan ? '继续中断的规划任务？' : '继续中断的修订任务？', message: '从已保存的检查点继续，已完成的阶段不重复调用模型；未完成的调用可能重新执行。恢复的规划需在完成后确认保存到续写设定。', modelName: resumeModel.value, confirmLabel: isPlan ? '继续规划' : '继续修订', symbol: isPlan ? '纲' : '修' })) return
+  resuming.value = true
+  try {
+    const route = isPlan ? `plan/jobs/${job.id}/resume` : `revisions/${job.id}/resume`
+    const started = await api<{ id: string }>(`/api/projects/${props.projectId}/${route}`,
+      writeOptions('POST', { model_name: resumeModel.value }))
+    await refresh()
+    const record = records.value.find(item => item.id === started.id)
+    if (record) await choose(record)
+  } catch (cause) { error.value = String(cause) }
+  finally { resuming.value = false }
+}
+async function saveRecoveredPlan() {
+  const job = selectedJob.value
+  if (!job || resuming.value) return
+  if (!await askConfirm({ title: '保存恢复的规划？', message: '将本次回目和分幕写入对应章节的续写设定，覆盖该章原规划，不修改小说正文。', confirmLabel: '确认保存', symbol: '纲' })) return
+  resuming.value = true
+  try {
+    await api(`/api/projects/${props.projectId}/plan/jobs/${job.id}/apply`, writeOptions('POST', {}))
+    savedPlanJob.value = job.id
+    error.value = ''
+  } catch (cause) { error.value = String(cause) }
+  finally { resuming.value = false }
+}
 function displayTime(value: string) { return value.replace('T', ' ') || '时间未知' }
 function label(key: string) { return fieldTitles[key] || key.replaceAll('_', ' ') }
 function valueText(value: unknown): string {
@@ -68,7 +101,7 @@ function detailFields(item: Record<string, unknown>, excluded: string[] = []) {
     .map(([key, value]) => ({ key, label: label(key), value: valueText(value) }))
 }
 async function choose(record: RecordItem) {
-  selected.value = record; logEvents.value = []; wikiEntries.value = []; wikiOpened.value = false; error.value = ''
+  selected.value = record; logEvents.value = []; wikiEntries.value = []; wikiOpened.value = false; planOpened.value = false; error.value = ''
   if (record.type !== 'log') return
   try {
     const result = await api<{ events: LogEvent[] }>(
@@ -84,6 +117,17 @@ async function loadWikiDetails() {
     const result = await api<{ entries: LogEvent[] }>(
       `/api/projects/${props.projectId}/wiki/logs/${encodeURIComponent(id)}`)
     if (selected.value?.id === id) { wikiEntries.value = result.entries; wikiOpened.value = true }
+  } catch (cause) { error.value = String(cause) }
+  finally { wikiLoading.value = false }
+}
+async function loadPlanDetails() {
+  if (!props.projectId || !selected.value || selected.value.type !== 'job') return
+  wikiLoading.value = true; error.value = ''
+  try {
+    const id = selected.value.id
+    const result = await api<{ entries: LogEvent[] }>(
+      `/api/projects/${props.projectId}/plan/logs/${encodeURIComponent(id)}`)
+    if (selected.value?.id === id) { wikiEntries.value = result.entries; planOpened.value = true }
   } catch (cause) { error.value = String(cause) }
   finally { wikiLoading.value = false }
 }
@@ -123,7 +167,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         <h2>{{ selected.title }}</h2><time>{{ displayTime(selected.created_at) }}</time></div>
       <template v-if="selected.type === 'job'"><p class="run-summary">{{ selectedJob?.message }}</p>
         <div v-if="selectedJob?.kind === 'wiki'" class="wiki-log-access"><div><strong>完整编纂日志</strong><p>逐片段保存提示词、模型原始回复、解析结果及耗时；可能含小说正文，只在本机查看。</p></div><button :disabled="wikiLoading" @click="loadWikiDetails">{{ wikiLoading ? '读取中…' : wikiOpened ? '刷新完整日志' : '查看完整日志' }}</button></div>
+        <div v-if="selectedJob && ['plan', 'consistency', 'revise'].includes(selectedJob.kind)" class="wiki-log-access"><div><strong>{{ selectedJob.kind === 'consistency' ? '完整审校日志' : selectedJob.kind === 'revise' ? '完整修订日志' : '完整规划日志' }}</strong><p>保存各阶段的提示词、模型原始回复及检查结果；可能含小说正文，只在本机查看。</p></div><button :disabled="wikiLoading" @click="loadPlanDetails">{{ wikiLoading ? '读取中…' : planOpened ? '刷新完整日志' : '查看完整日志' }}</button></div>
+        <button v-if="selectedJob && ['revise', 'plan'].includes(selectedJob.kind) && ['failed', 'interrupted'].includes(selectedJob.status) && resumeModel" :disabled="resuming" @click="resumeRevision">{{ resuming ? '恢复中…' : selectedJob.kind === 'plan' ? '从检查点继续规划' : '从检查点继续修订' }}</button>
+        <button v-if="selectedJob?.kind === 'plan' && selectedJob.status === 'completed' && selectedJob.result?.resumed" :disabled="resuming || savedPlanJob === selectedJob.id" @click="saveRecoveredPlan">{{ savedPlanJob === selectedJob.id ? '已保存到续写设定' : resuming ? '保存中…' : '保存恢复的规划到续写设定' }}</button>
         <div v-if="wikiOpened" class="wiki-log-details"><p v-if="!wikiEntries.length" class="muted-note">日志文件暂无记录。</p><details v-for="(entry, index) in wikiEntries" :key="index"><summary><span>{{ String(entry.event || '事件') }}</span><small>第 {{ entry.chapter ?? '—' }} 章 · 片段 {{ entry.chunk ?? '—' }} · {{ displayTime(String(entry.timestamp || '')) }}</small></summary><dl class="wiki-log-fields"><div v-for="field in detailFields(entry, ['timestamp', 'event'])" :key="field.key"><dt>{{ label(field.key) }}</dt><dd><pre v-if="field.key === 'prompt' || field.key === 'raw_response'">{{ field.value }}</pre><span v-else>{{ field.value }}</span></dd></div></dl></details></div>
+        <div v-if="planOpened" class="wiki-log-details"><p v-if="!wikiEntries.length" class="muted-note">日志文件暂无记录。</p><details v-for="(entry, index) in wikiEntries" :key="index"><summary><span>{{ String(entry.event || '事件') }}</span><small>{{ String(entry.stage || '流程') }} · {{ displayTime(String(entry.timestamp || '')) }}</small></summary><dl class="wiki-log-fields"><div v-for="field in detailFields(entry, ['timestamp', 'event'])" :key="field.key"><dt>{{ field.label }}</dt><dd><pre v-if="field.key === 'prompt' || field.key === 'raw_response' || field.key === 'plan'">{{ field.value }}</pre><span v-else>{{ field.value }}</span></dd></div></dl></details></div>
         <h3>过程</h3><ol class="run-events"><li v-for="(event, index) in [...(selectedJob?.events || [])].reverse()" :key="index">
           <time>{{ event.time }}</time><div><strong>{{ event.message }}</strong>
             <dl v-if="Object.keys(event.data || {}).length" class="run-fields"><div v-for="field in detailFields(event.data)" :key="field.key">

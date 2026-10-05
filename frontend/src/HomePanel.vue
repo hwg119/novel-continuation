@@ -23,7 +23,7 @@ const todoCount = computed(() => Number(!props.chapters.length) + Number(!props.
   Number(!!props.chapters.length && !plan.value?.has_beats && !checking.value) +
   Number(!!props.chapters.length && vectorSegments.value === 0) + Number(props.wikiPendingCount > 0))
 const jobNames: Record<string, string> = { generate: '章节续写', revise: '整章修订',
-  consistency: '一致性审校', vectors: '向量库构建', chapter_vector: '章节向量更新', corpus: '导入母本',
+  consistency: '故事审校', vectors: '向量库构建', chapter_vector: '章节向量更新', corpus: '导入母本',
   wiki: 'Wiki 更新', illustration: '章节插图', plan: '分幕规划', book_rules: '全书规则' }
 function jobStatus(status: string) {
   return status === 'running' ? '运行中' : status === 'completed' ? '已完成' :

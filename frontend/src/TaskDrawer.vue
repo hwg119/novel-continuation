@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, type Job } from './api'
+import { taskEventLevel as eventLevel } from './taskEventLevel'
 
 const props = defineProps<{ projectId: string; focusJob: string }>()
 const emit = defineEmits<{
@@ -10,6 +11,7 @@ const emit = defineEmits<{
 const job = ref<Job | null>(null)
 const expanded = ref(false)
 const dismissed = ref('')
+const closedJob = ref<Job | null>(null)
 const error = ref('')
 const logBox = ref<HTMLElement | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
@@ -28,11 +30,6 @@ const dataLabels: Record<string, string> = {
   remaining_time: '预计剩余', action: '处理方式', chapter_segments: '本章分段',
 }
 function stage(value: string) { return stages[value] || value }
-function eventLevel(value: string) {
-  if (/失败|错误|异常|警告|未通过|中断/.test(value)) return 'error'
-  if (/完成|成功|通过|已生成/.test(value)) return 'success'
-  return 'info'
-}
 function valueText(value: unknown): string {
   if (Array.isArray(value)) return value.map(valueText).join('；') || '无'
   if (value && typeof value === 'object') return Object.entries(value).map(([key, part]) =>
@@ -73,8 +70,19 @@ async function refresh() {
   } catch (cause) { error.value = String(cause) }
   finally { loading = false }
 }
-function close() { if (job.value) dismissed.value = job.value.id; job.value = null; expanded.value = false }
-watch(() => props.projectId, () => { job.value = null; dismissed.value = ''; void refresh() })
+function close() {
+  if (job.value) { closedJob.value = job.value; dismissed.value = job.value.id }
+  job.value = null
+  expanded.value = false
+}
+function reopen() {
+  job.value = closedJob.value
+  dismissed.value = ''
+  expanded.value = true
+  void refresh()
+  void nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
+}
+watch(() => props.projectId, () => { job.value = null; closedJob.value = null; dismissed.value = ''; void refresh() })
 watch(() => props.focusJob, () => { dismissed.value = ''; void refresh() })
 watch([() => !!job.value, expanded], ([visible, isExpanded]) => {
   emit('layout', { visible, expanded: visible && isExpanded })
@@ -97,11 +105,13 @@ onUnmounted(() => { if (timer) clearInterval(timer); emit('layout', { visible: f
   <div v-if="expanded" ref="logBox" class="task-drawer-log" role="log" aria-live="polite" aria-relevant="additions">
     <div class="terminal-session"><span>SESSION</span><code>{{ job.id }}</code><span class="terminal-session-kind">{{ job.kind }}</span></div>
     <p v-if="error" class="task-error"><span aria-hidden="true">!</span> {{ error }}</p>
-    <div v-for="(event, index) in job.events" :key="index" class="task-event" :class="eventLevel(event.message)">
+    <div v-for="(event, index) in job.events" :key="index" class="task-event" :class="eventLevel(event)">
       <span class="task-line-number" aria-hidden="true">{{ String(index + 1).padStart(3, '0') }}</span>
-      <time>{{ event.time }}</time><span class="task-level">{{ eventLevel(event.message) === 'error' ? 'ERR' : eventLevel(event.message) === 'success' ? 'OK' : 'INFO' }}</span>
+      <time>{{ event.time }}</time><span class="task-level">{{ eventLevel(event) === 'error' ? 'ERR' : eventLevel(event) === 'success' ? 'OK' : 'INFO' }}</span>
       <div class="task-event-body"><strong>{{ stage(event.message) }}</strong><small v-if="Object.keys(event.data || {}).length">{{ details(event.data) }}</small></div></div>
     <p v-if="!job.events.length" class="task-waiting"><span aria-hidden="true">›</span> 任务已开始，等待第一条进度日志<span class="terminal-cursor" aria-hidden="true">▌</span></p>
     <div class="terminal-footer"><span>{{ job.status === 'running' ? '● 实时更新中' : '● 本次任务已结束' }}</span><button type="button" class="task-view" @click="emit('view'); expanded = false">查看完整运行记录 ↗</button></div>
   </div>
-</aside></template>
+</aside>
+<button v-else-if="closedJob" type="button" class="task-reopen" aria-label="重新打开任务控制台" @click="reopen"><span aria-hidden="true">&gt;_</span> 打开控制台</button>
+</template>

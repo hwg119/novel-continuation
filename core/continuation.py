@@ -17,6 +17,7 @@ import os
 import re
 import time
 import urllib.request
+from collections.abc import Callable
 
 from core.project_manager import chapter_path, chapters_dir, list_chapter_files
 from core.utils import read_file
@@ -31,16 +32,20 @@ class ContinuationLLM:
         self.cfg = dict(llm_config or {})
         self.fmt = str(self.cfg.get("interface_format", "")).strip().lower()
         self.is_ollama = self.fmt == "ollama"
+        self.last_response_diagnostics = {}
 
     def complete(self, prompt: str, system: str = "",
                  temperature: float = None, num_predict: int = None,
-                 disable_thinking: bool = False) -> str:
+                 disable_thinking: bool = False, thinking_effort: str = None) -> str:
         temperature = (self.cfg.get("temperature", 0.8)
                        if temperature is None else temperature)
+        self.last_response_diagnostics = {"model_name": self.cfg.get("model_name"),
+                                          "interface_format": self.cfg.get("interface_format"),
+                                          "requested_max_tokens": int(num_predict or self.cfg.get("max_tokens", 4096))}
         if self.is_ollama:
             return self._ollama_chat(prompt, system, temperature, num_predict)
         return self._adapter_invoke(prompt, system, temperature, num_predict,
-                                    disable_thinking=disable_thinking)
+                                    disable_thinking=disable_thinking, thinking_effort=thinking_effort)
 
     # -- 原生 Ollama --------------------------------------------------
 
@@ -77,17 +82,27 @@ class ContinuationLLM:
         timeout = int(self.cfg.get("timeout", 2400) or 2400)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        self.last_response_diagnostics.update({key: data.get(key) for key in
+            ("done_reason", "prompt_eval_count", "eval_count", "total_duration")})
         return (data.get("message") or {}).get("content", "") or ""
 
     # -- 通用适配器 ----------------------------------------------------
 
     def _adapter_invoke(self, prompt, system, temperature, num_predict,
-                        disable_thinking=False) -> str:
+                        disable_thinking=False, thinking_effort=None) -> str:
         from llm_adapters import create_llm_adapter
         model_name = str(self.cfg.get("model_name", "")).lower()
         extra_body = None
-        if disable_thinking and self.fmt == "openai":
-            if model_name == "minimax-m3" or model_name.startswith("mimo-v2.6-"):
+        if thinking_effort is not None:
+            if disable_thinking:
+                raise ValueError("不能同时关闭思考并指定思考强度")
+            if thinking_effort != "low" or model_name != "deepseek-flash" or self.fmt not in {"openai", "deepseek"}:
+                raise ValueError("当前显式思考策略仅支持 DeepSeek flash 的 low 模式")
+            extra_body = {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}
+        if disable_thinking and self.fmt in {"openai", "deepseek"}:
+            if self.fmt == "deepseek" or model_name == "deepseek-flash":
+                extra_body = {"thinking": {"type": "disabled"}}
+            elif model_name == "minimax-m3" or model_name.startswith("mimo-v2.6-"):
                 extra_body = {"thinking": {"type": "disabled"}}
             elif model_name.startswith(("qwen3.5-", "qwen3.6-", "qwen3.7-",
                                         "qwen3.8-", "deepseek-v4")):
@@ -107,7 +122,10 @@ class ContinuationLLM:
             extra_body=extra_body,
         )
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
-        return adapter.invoke(full_prompt) or ""
+        result = adapter.invoke(full_prompt) or ""
+        self.last_response_diagnostics.update(getattr(adapter, "last_response_diagnostics", {}))
+        self.last_response_diagnostics["requested_thinking_parameters"] = extra_body
+        return result
 
 
 # ----------------------------- 文本处理 -----------------------------
@@ -255,7 +273,9 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
                       style: str, settings: dict, chars_per_beat: int,
                       retrieved_context: str = "",
                       previous_summaries: list = None,
-                      previous_chapter_tail: str = "") -> str:
+                      previous_chapter_tail: str = "", audit=None) -> str:
+    from core.agent_skill import skill_guidance
+    guidance = skill_guidance("chapter-writing", audit=audit, stage=f"beat_{beat.get('num', '')}")
     num = beat.get("num", "")
     name = beat.get("name", "")
     desc = beat.get("desc", "")
@@ -307,7 +327,7 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
             + wiki_history[:2200] + "\n"
         )
 
-    # 术语表：强制固定译名，避免「翻倒巷」被写成「翻侧巷子」这类漂移
+    # 术语表：强制使用工程固定译名，避免译名漂移
     glossary_block = ""
     glossary = settings.get("glossary") or {}
     if isinstance(glossary, dict):
@@ -342,12 +362,11 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
     script_rule = "全文使用繁体字" if settings.get("traditional") else "全文使用简体字，须与母本一致"
 
     voices = settings.get("character_voices", "").strip()
-    voices_line = f"4. 人物口吻：{voices}\n" if voices else ""
 
     forbidden_words = settings.get("forbidden_words") or []
     forbid_line = ""
     if forbidden_words:
-        forbid_line = "11. 严禁出现以下词句：" + "、".join(forbidden_words) + "\n"
+        forbid_line = "作者禁用词句：" + "、".join(forbidden_words) + "\n"
 
     extra = settings.get("extra_requirements", "").strip()
     extra_line = f"\n【附加要求】\n{extra}\n" if extra else ""
@@ -359,7 +378,9 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
             f"不得直接抄写，也不得覆盖最近章节已经发生的变化）\n{retrieved_context.strip()[:1200]}\n"
         )
 
-    return f"""【本书背景】
+    return f"""{guidance}
+
+【本书背景】
 {settings.get('background', '') or '(未填写)'}
 
 【本章回目】
@@ -376,7 +397,7 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
 【本章分幕大纲】（仅供掌握全局，已写部分切勿重述）
 {outline}
 
-【语体样本】（只学习句法、节奏和氛围；严禁复用其中任何原句、对白、人物动作、地点或情节顺序）
+【语体样本】（只学习句法、节奏和氛围，不照抄句子与情节；已有设定仍以实际上下文为准）
 {style or '(未提供)'}{retrieved_block}
 
 【已写正文的末尾】（须自然衔接，但不得复述其字句）
@@ -387,18 +408,16 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
 {forbidden_list(written_paras)}
 
 【本幕任务】第{num}幕「{name}」：{desc}
+【本幕状态卡】
+{json.dumps({key: beat.get(key, '') for key in ('pov', 'time', 'location', 'known_before', 'new_facts', 'end_state')}, ensure_ascii=False)}
 
-【硬性要求】
-1. 只写本幕内容，约 {chars_per_beat} 字。{end_rule}{next_beat_rule}
-2. {script_rule}；标点使用中文标点。
-3. 严禁重复：不得与禁写清单雷同；同一景物描写、同一段对话不得出现两次。
-{voices_line}5. 人名、称谓前后一致，不可张冠李戴。
-6. 只准汉字与中文标点：严禁拉丁字母、英文单词、markdown 符号（* # _ ` 等）、括号注记。
-7. 直接输出正文段落，不要标题、不要解释、不要 markdown。
-8. 必须完整落实【本幕任务】中描述的全部要素（人物、地点、事件、动作），一个都不能遗漏。
-9. 严禁引入【本章分幕大纲】与【本书背景】之外的人物、地点、机构、事件；不得编造原著中不存在的地名、机构名或道具名。
-10. 若【本幕任务】要求出现搭档、任务、地点或道具，必须在正文中明确交代，不得回避、不得推迟到后续幕。
+【本次交付要求】
+- 本幕约 {chars_per_beat} 字。{end_rule}{next_beat_rule}
+- {script_rule}；使用中文标点，直接输出自然段，无标题、Markdown 或说明。
+- 人物口吻：{voices or '沿用上下文中的人物声音'}。
+- 落实本幕事件与结束状态，可补充服务场景的动作、互动与细节，不凭空改变主线事实。
 {forbid_line}{extra_line}"""
+
 
 
 # ----------------------------- 生成主流程 -----------------------------
@@ -773,6 +792,7 @@ def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
             retrieved_context=retrieved,
             previous_summaries=previous[-3:] if summary_enabled else None,
             previous_chapter_tail=previous_chapter_tail if i == 1 else "",
+            audit=run_log,
         )
         if progress:
             progress("beat_start", {"index": i, "total": len(beats),
@@ -797,6 +817,10 @@ def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
                         f"请重新完成本幕，至少写 {min_beat_chars} 个中文字符。"
                         "只输出本幕小说正文，不要分析、解释、标题、提纲、Markdown 或思考过程。"
                     )
+                run_log.write("beat_model_request", beat_index=i, attempt=attempt + 1,
+                              model=getattr(llm, "cfg", {}).get("model_name", ""),
+                              prompt=request_prompt, disable_thinking=True)
+                attempt_started = time.monotonic()
                 raw = llm.complete(
                     request_prompt,
                     system=local_settings.get("system_prompt", ""),
@@ -807,6 +831,9 @@ def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
                     # 这也避免推理占满输出额度，清洗后只剩空正文。
                     disable_thinking=True,
                 )
+                run_log.write("beat_model_response", beat_index=i, attempt=attempt + 1,
+                              raw_response=raw, elapsed_ms=round((time.monotonic() - attempt_started) * 1000),
+                              response_diagnostics=getattr(llm, "last_response_diagnostics", {}))
                 text = clean_text(raw, local_settings)
                 candidate, candidate_dropped = dedupe(paragraphs(text))
                 candidate_chars = sum(len(p) for p in candidate)
@@ -943,71 +970,408 @@ def _first_json_object(raw: str) -> dict:
     raise ValueError("模型未返回章节规划 JSON。")
 
 
-def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
-                         previous_context: str = "", wiki_history: str = "") -> dict:
-    """为新章提出回目和分幕；只返回建议，不自动覆盖已保存计划。"""
-    prompt = f"""你是长篇小说的章节结构编辑。请根据全书设定、上一章正文结尾、有效摘要、最近 Wiki 事实和当前章目标，规划下一章。
 
-信息优先级：当前章专属要求 > 上一章正文结尾 > 有效摘要 > 最近 Wiki > 较早全书背景。
+
+def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
+                       temperature: float = 0.3, audit=None,
+                       stage: str = "draft") -> dict:
+    """请求并解析一份章节规划；这里只处理传输格式，不替代剧情审查。"""
+    last_error = "模型未返回章节规划 JSON"
+    from core.agent_skill import skill_guidance
+    reference = "draft" if stage == "draft" else "repair"
+    prompt = skill_guidance("chapter-planning", reference, audit, stage) + "\n\n" + prompt
+    if reference == "repair" and audit:
+        audit.write("repair_evidence_policy", stage=stage,
+                    policy="clarify_supported_or_show_new_discovery_not_invent_past")
+    attempts = 1 if stage in {"editorial_patch", "acceptance_editorial_patch"} else 2
+    for attempt in range(attempts):
+        request = prompt if attempt == 0 else (
+            f"上次输出无法解析或结构不完整：{last_error}。"
+            "请保留原任务，只修复输出格式并给出完整 JSON 对象。\n\n" + prompt)
+        request_temperature = temperature if attempt == 0 else 0.1
+        if audit:
+            audit.write("model_request", stage=stage, attempt=attempt + 1,
+                        temperature=request_temperature, prompt_chars=len(request),
+                        prompt=request)
+        started = time.monotonic()
+        try:
+            raw = llm.complete(
+                request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
+                temperature=request_temperature,
+                num_predict=max(2200, num_beats * 460), disable_thinking=True)
+        except Exception as exc:
+            if audit:
+                audit.write("model_request_failed", stage=stage, attempt=attempt + 1,
+                            elapsed_ms=round((time.monotonic() - started) * 1000),
+                            error_type=type(exc).__name__, error=str(exc))
+            raise
+        if audit:
+            audit.write("model_response", stage=stage, attempt=attempt + 1,
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                        response_chars=len(raw or ""), raw_response=raw)
+        try:
+            data = _first_json_object(raw)
+            issues = _chapter_plan_issues(data, num_beats, "")
+            if audit:
+                audit.write("structure_check", stage=stage, attempt=attempt + 1,
+                            passed=not issues, issues=issues,
+                            advisory_notes=_chapter_plan_advisories(data),
+                            title=str(data.get("title") or ""),
+                            beats_count=len(data.get("beats") or []))
+            if not issues:
+                return data
+            last_error = "；".join(issues)
+        except ValueError as exc:
+            last_error = str(exc)
+            if audit:
+                audit.write("parse_failed", stage=stage, attempt=attempt + 1,
+                            error=last_error)
+    raise ValueError(last_error)
+
+
+def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
+                         previous_context: str, wiki_history: str,
+                         chapter_goal: str, audit=None, project_dir=None,
+                         chapter_number=None, progress=None) -> list[dict]:
+    """让独立审查轮只找问题，不让它一边批评一边重写。"""
+    from core.plan_evidence import evidence_sources, verify_issue
+    sources = evidence_sources(previous_context[:7500], wiki_history[:1800], draft)
+    from core.agent_skill import skill_guidance
+    guidance = skill_guidance("chapter-planning", "review", audit, "review")
+    prompt = f"""{guidance}
+
+【本章目标】
+{chapter_goal or '承接上一章，自然推进情节'}
+【分类证据目录｜逐条引用对应来源编号】
+{json.dumps(sources, ensure_ascii=False)}
+本次审查恰好包含 {num_beats} 幕；只返回本步骤的 JSON 审查结果。"""
+
+    try:
+        if audit:
+            audit.write("review_request", prompt_chars=len(prompt), prompt=prompt)
+        started = time.monotonic()
+        if project_dir and chapter_number:
+            from core.planning_research import research_review
+            data = research_review(llm, prompt, sources, project_dir, int(chapter_number),
+                                   _first_json_object, audit=audit, progress=progress,
+                                   num_predict=max(1200, num_beats * 240))
+        else:
+            raw = llm.complete(
+                prompt, system="你只负责审查章节规划并输出 JSON，不负责续写正文。",
+                temperature=0.1, num_predict=max(1200, num_beats * 240),
+                disable_thinking=True)
+            if audit:
+                audit.write("review_response",
+                            elapsed_ms=round((time.monotonic() - started) * 1000),
+                            response_chars=len(raw or ""), raw_response=raw)
+            data = _first_json_object(raw)
+        issues = data.get("issues")
+        if not isinstance(issues, list):
+            if audit:
+                audit.write("review_parse_failed", error="issues 不是数组")
+            return [{"severity": "low", "scope": "审查流程", "problem": "初审未完成：issues 不是数组",
+                     "check_failed": True}]
+        result = [item for item in issues if isinstance(item, dict) and item.get("problem")][:8]
+        for item in result:
+            verify_issue(item, sources)
+        # 未回答的疑问进入持久化提醒，但不参与自动修补。
+        uncertainties = data.get("uncertainties")
+        if isinstance(uncertainties, list):
+            for note in uncertainties[:8]:
+                problem = str(note.get("problem") or "") if isinstance(note, dict) else str(note or "")
+                if problem.strip():
+                    result.append({"severity": "low", "scope": "历史查证待确认",
+                                   "problem": problem, "evidence_state": "uncertain",
+                                   "evidence_verified": False, "citations": [],
+                                   "evidence_status": "查阅后仍有疑问，仅提醒，不自动修补"})
+        if audit:
+            audit.write("review_evidence_sources", sources=sources)
+            audit.write("review_parsed", issues_count=len(result), issues=result)
+        return result
+    except Exception as exc:
+        # 审查轮失败不应抹掉一份结构有效的初稿。
+        if audit:
+            audit.write("review_parse_failed", error_type=type(exc).__name__, error=str(exc))
+        return [{"severity": "low", "scope": "审查流程", "problem": f"初审未完成：{exc}",
+                 "check_failed": True}]
+
+
+def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
+                             review_issues: list[dict], num_beats: int,
+                             previous_context: str, audit=None) -> dict:
+    """重写后只做验收，避免审查意见在改写过程中被解决一半或引入新问题。"""
+    from core.agent_skill import skill_guidance
+    guidance = skill_guidance("chapter-planning", "acceptance", audit, "acceptance")
+    prompt = f"""{guidance}
+
+【近期连续性上下文】
+{previous_context[:7500] or '（未提供）'}
+【初稿】
+{json.dumps(draft, ensure_ascii=False)}
+【初审意见】
+{json.dumps(review_issues, ensure_ascii=False)}
+【重写稿】
+{json.dumps(rewritten, ensure_ascii=False)}
+
+只返回本步骤验收 JSON，不重写规划。"""
+
+    if audit:
+        audit.write("acceptance_request", prompt_chars=len(prompt), prompt=prompt)
+    started = time.monotonic()
+    try:
+        raw = llm.complete(
+            prompt, system="你只验收章节规划并输出 JSON，不重写正文或规划。",
+            temperature=0.1, num_predict=max(1200, num_beats * 220),
+            disable_thinking=True)
+        if audit:
+            audit.write("acceptance_response",
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                        response_chars=len(raw or ""), raw_response=raw)
+        data = _first_json_object(raw)
+        if any(not isinstance(data.get(key), list) for key in
+               ("unresolved", "new_issues", "editorial_notes")):
+            raise ValueError("验收结果缺少完整问题数组")
+        unresolved = [item for item in data["unresolved"] if isinstance(item, dict) and item.get("problem")]
+        new_issues = [item for item in data["new_issues"] if isinstance(item, dict) and item.get("problem")]
+        notes = data["editorial_notes"]
+        result = {"passed": not (unresolved or new_issues),
+                  "unresolved": unresolved[:8], "new_issues": new_issues[:8],
+                  "editorial_notes": notes[:8]}
+        if audit:
+            audit.write("acceptance_parsed", **result)
+        return result
+    except Exception as exc:
+        if audit:
+            audit.write("acceptance_failed", error_type=type(exc).__name__, error=str(exc))
+        return {"passed": None, "unresolved": [], "new_issues": [],
+                "editorial_notes": [], "check_failed": str(exc)}
+
+
+def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
+                         previous_context: str = "", wiki_history: str = "",
+                         progress: Callable[[str], None] | None = None,
+                         audit=None, stage_runner=None, project_dir=None) -> dict:
+    """为新章提出回目和分幕；只返回建议，不自动覆盖已保存计划。"""
+    def run_stage(name, function, *args, **kwargs):
+        if stage_runner:
+            return stage_runner(name, lambda: function(*args, **kwargs))
+        return function(*args, **kwargs)
+    prompt = f"""【程序指定目标章节】
+第 {settings.get('chapter_number', '')} 章；恰好 {num_beats} 幕。
 【全书背景】
 {settings.get('background', '')}
 【全书附加规则】
 {settings.get('extra_requirements', '')}
-【上一章有效摘要与正文结尾】
-{previous_context[:3500] or '（未提供）'}
+【近期连续性上下文】
+{previous_context[:7500] or '（未提供）'}
 【最近 Wiki 原文依据】
 {wiki_history[:2200] or '（未提供）'}
 【本章目标】
 {settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
 【本章专属要求】
 {settings.get('chapter_requirements', '') or '（无）'}
+只返回完整规划 JSON。"""
 
-硬性规则：
-1. 第一幕必须直接承接上一章结尾的人物、地点与未完成事件。
-2. 本章最多两条主要人物线、两个主要视角；不得让上一章刚分别的所有人物立即重聚。
-3. 人物只能使用自己亲眼所见、亲耳所闻或此前已被告知的信息；不同人物线的新信息不得自动共享。
-4. 必须考虑路程与时间，不得让相隔很远的人物无过渡地在同一天抵达同一地点。
-5. 允许新增人物、地点、事物或线索来保持新鲜感。普通路人、日常物件和短期障碍可自然加入；全章最多引入一个主要新增元素。
-6. 主要新增元素（核心人物、重要组织、关键物品或重大设定）必须交代其出场入口、与现有剧情的连接及后续用途，不得改写原文或 Wiki 已确认事实。新线索首次出现时只能作为待验证信息，不能直接当作既定历史。
-7. 不得无来源地发明会改变主线的旧事、亲属、武功、伤病、死亡或情报，也不得让新增人物取代上一章主角。
-8. 每幕推进一个新事件并产生明确结束状态，不重复前幕，不一次解决全部悬念；主要新增元素不应在同一章内耗尽全部作用。
-9. 规划前在内部检查人物信息权限、时间、距离、状态、事实来源和新增元素的合理性；不要输出分析过程。
+    if progress:
+        progress("正在生成章节规划初稿（第 1/4 阶段）")
+    if audit:
+        audit.write("context_prepared", num_beats=num_beats,
+                    target_chapter_number=settings.get("chapter_number"),
+                    previous_summary_available="【上一章摘要】" in previous_context,
+                    previous_opening_available="正文开头定位】" in previous_context,
+                    previous_plan_reference_used="【上一章规划参考" in previous_context,
+                    background_chars=len(str(settings.get('background') or '')),
+                    rules_chars=len(str(settings.get('extra_requirements') or '')),
+                    continuity_chars=len(previous_context), wiki_chars=len(wiki_history),
+                    goal=str(settings.get('chapter_brief') or ''),
+                    chapter_requirements=str(settings.get('chapter_requirements') or ''))
+    try:
+        draft = run_stage("draft", _request_plan_json, llm, prompt, num_beats, temperature=0.4,
+                                   audit=audit, stage="draft")
+    except ValueError as exc:
+        raise ValueError(f"章节规划初稿未通过：{exc}") from exc
 
-输出严格 JSON 对象：
-{{"title":"本章回目","beats":[{{"num":"一","name":"幕名","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕通过可见渠道获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"人物/地点/物品/组织/线索","source_or_entry":"如何自然进入当前剧情","future_use":"后续可能发挥的作用；不能当章全部解决"}}],"desc":"本幕具体事件","end_state":"幕末人物、地点与未完成事件"}}]}}。
-没有主要新增元素的幕必须输出 "new_elements":[]；全章所有幕合计最多一个主要新增元素。
-恰好 {num_beats} 幕。
-只输出 JSON，不要 Markdown 或解释。"""
-    data = None
-    parse_error = None
-    for attempt in range(2):
-        request = prompt if attempt == 0 else (
-            "上次规划未通过结构或连续性检查：" + "；".join(parse_error or ["JSON 无效"]) +
-            "。请修正后直接给出完整 JSON 对象，不要输出分析过程。\n\n" + prompt)
-        raw = llm.complete(
-            request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
-            temperature=0.4 if attempt == 0 else 0.1,
-            num_predict=max(2200, num_beats * 420), disable_thinking=True)
+    if progress:
+        progress("正在独立审查重复情节与连续性（第 2/4 阶段）")
+    review_issues = run_stage("review", _review_chapter_plan,
+        llm, draft, num_beats, previous_context, wiki_history,
+        str(settings.get('chapter_brief') or ''), audit=audit, project_dir=project_dir,
+        chapter_number=settings.get('chapter_number'), progress=progress)
+    data = draft
+    substantive_issues = [item for item in review_issues
+                          if str(item.get("severity") or "low").lower() in ("high", "medium")
+                          and item.get("evidence_verified")]
+    editorial_issues = [item for item in review_issues if item.get("severity") == "low"
+                        and item.get("evidence_verified") and not item.get("check_failed")]
+    if substantive_issues:
+        if progress:
+            progress(f"审查发现 {len(substantive_issues)} 个剧情问题、"
+                     f"{len(review_issues) - len(substantive_issues)} 个编辑提醒，"
+                     "正在定向重写（第 3/4 阶段）")
+            for item in review_issues:
+                scope = str(item.get("scope") or "相关分幕").strip()
+                severity = str(item.get("severity") or "medium").lower()
+                progress(f"规划审查提醒 · {scope} · {severity}")
+        rewrite_prompt = f"""你是长篇小说的章节主编。请根据独立审查意见重写规划初稿。
+
+【原始任务与依据】
+{prompt}
+
+【规划初稿】
+{json.dumps(draft, ensure_ascii=False)}
+【独立审查意见】
+{json.dumps(substantive_issues, ensure_ascii=False)}
+
+重写要求：
+1. 逐项解决审查意见，同时保留初稿中未受影响的有效人物线和线索。
+2. 对重复既有内容的幕，不能只换幕名、地点、措辞或时间；必须替换其剧情功能，使其产生新的信息、决定、阻碍或关系变化。
+3. 可以合并功能重复的内容，但最终仍须恰好 {num_beats} 幕；空出的幕用于推进尚未完成的线索或引入一个自然的新变化。
+4. 不输出修改说明。严格使用原始任务要求的 JSON 结构，只输出完整 JSON。"""
         try:
-            data = _first_json_object(raw)
-            parse_error = _chapter_plan_issues(data, num_beats, previous_context)
-            if not parse_error:
-                break
-            data = None
+            data = run_stage("rewrite", _request_plan_json, llm, rewrite_prompt, num_beats, temperature=0.2,
+                                      audit=audit, stage="rewrite")
         except ValueError as exc:
-            parse_error = [str(exc)]
-    if data is None:
-        raise ValueError("章节规划未通过：" + "；".join(parse_error or ["模型未返回章节规划 JSON"]))
-    title = str(data.get("title") or "").strip()
+            if stage_runner:
+                raise
+            if progress:
+                progress(f"提醒：定向重写未通过结构检查，保留可用初稿：{exc}")
+            data = draft
+    elif progress:
+        progress("初审未发现证据充分的剧情问题，保留初稿；低风险提醒见完整日志")
+
+    final_source = "rewrite" if data is not draft else "draft"
+    validation_status = "initial_review_only"
+    all_editorial_notes = [dict(item, review_stage="initial") for item in review_issues
+                          if item.get("severity") == "low" or not item.get("evidence_verified")]
+    if any(item.get("check_failed") for item in review_issues):
+        validation_status = "incomplete"
+    if not substantive_issues and editorial_issues:
+        if progress:
+            progress(f"正在规范 {len(editorial_issues)} 个文字问题（一次最小修补）")
+        editorial_prompt = f"""你是规划校对编辑。只修正文稿中证据明确的文字问题。
+【当前规划】
+{json.dumps(draft, ensure_ascii=False)}
+【文字校对意见】
+{json.dumps(editorial_issues, ensure_ascii=False)}
+只修改意见涉及的名称、计数、称谓或错字，并同步涉及字段。不得改变剧情、幕顺序、线索、人物关系与事件结果。计数不能确认时使用不带序号的称谓。恰好保留 {num_beats} 幕，输出相同结构的完整 JSON。"""
+        try:
+            data = run_stage("editorial_patch", _request_plan_json, llm, editorial_prompt, num_beats,
+                                      temperature=0.1, audit=audit, stage="editorial_patch")
+            final_source = "editorial_patch"
+            validation_status = "editorial_pending_review"
+            if audit:
+                audit.write("editorial_patch_applied", requested_fixes=editorial_issues)
+        except Exception as exc:
+            if audit:
+                audit.write("editorial_patch_rejected", error_type=type(exc).__name__, error=str(exc))
+            if progress:
+                progress("提醒：文字修补未完成，保留初稿；详见完整日志")
+    if data is not draft and final_source != "editorial_patch":
+        if progress:
+            progress("正在验收重写后的规划（第 4/4 阶段）")
+        acceptance = run_stage("acceptance", _validate_rewritten_plan,
+            llm, draft, data, [item for item in review_issues if item.get("evidence_verified")],
+            num_beats, previous_context, audit=audit)
+        acceptance_issues = list(acceptance.get("unresolved") or []) + list(
+            acceptance.get("new_issues") or [])
+        editorial_notes = list(acceptance.get("editorial_notes") or [])
+        all_editorial_notes.extend(dict(item, review_stage="acceptance") for item in editorial_notes
+                                   if isinstance(item, dict))
+        if acceptance.get("check_failed"):
+            validation_status = "incomplete"
+            if progress:
+                progress("提醒：重写后验收调用未完成，保留结构有效的重写稿；详见完整规划日志")
+        elif acceptance_issues:
+            validation_status = "needs_review"
+            if progress:
+                progress(f"后验收发现 {len(acceptance_issues)} 个待修补问题，"
+                         "正在进行一次局部修补（条件阶段）")
+                for item in acceptance_issues:
+                    scope = str(item.get("scope") or "相关分幕").strip()
+                    progress(f"后验收提醒 · {scope}")
+            patch_prompt = f"""你是章节规划的修订编辑。只对验收未通过之处做一次最小局部修补。
+
+【近期连续性上下文】
+{previous_context[:7500] or '（未提供）'}
+【当前重写稿】
+{json.dumps(data, ensure_ascii=False)}
+【验收未通过项】
+{json.dumps(acceptance_issues, ensure_ascii=False)}
+【低风险编辑提醒】
+{json.dumps(editorial_notes, ensure_ascii=False)}
+
+要求：
+1. 逐项修复验收问题；未涉及的幕、线索和节奏保持不变。
+2. 只能做解决问题所需的最小改动，不重新构思整章，不增加新的主要人物线或设定。
+3. 修改幕内时间、地点或决定时，同步修正该幕的 known_before、new_facts、desc 和 end_state。
+4. 恰好保留 {num_beats} 幕，并使用原规划相同的完整 JSON 结构。只输出 JSON。"""
+            try:
+                data = run_stage("local_patch", _request_plan_json,
+                    llm, patch_prompt, num_beats, temperature=0.1,
+                    audit=audit, stage="local_patch")
+                final_source = "local_patch"
+                validation_status = "patched_pending_review"
+                if audit:
+                    audit.write("local_patch_applied", fixed_issues=acceptance_issues,
+                                editorial_notes=editorial_notes)
+            except ValueError as exc:
+                if stage_runner:
+                    raise
+                if progress:
+                    progress(f"提醒：局部修补未通过结构检查，保留重写稿：{exc}")
+                if audit:
+                    audit.write("local_patch_rejected", error=str(exc))
+        else:
+            validation_status = "passed"
+            if progress:
+                progress(f"重写后验收通过；另有 {len(editorial_notes)} 个低风险编辑提醒")
+            if editorial_notes:
+                if progress:
+                    progress("正在规范后验收的文字提醒（一次最小修补）")
+                editorial_prompt = f"""你是规划校对编辑，仅处理终审的文字提醒。
+【当前规划】
+{json.dumps(data, ensure_ascii=False)}
+【终审文字提醒】
+{json.dumps(editorial_notes, ensure_ascii=False)}
+只改提醒涉及的文字并同步对应字段。不得增加事件或改变剧情、人物状态、线索、幕顺序；不能确认的表述使用限定范围的措辞。不为普通材料补充 new_elements，保持现有新增元素登记。保留 {num_beats} 幕，输出相同结构的完整 JSON。"""
+                try:
+                    data = run_stage("acceptance_editorial_patch", _request_plan_json, llm, editorial_prompt, num_beats,
+                                              temperature=0.1, audit=audit, stage="acceptance_editorial_patch")
+                    final_source = "acceptance_editorial_patch"
+                    validation_status = "editorial_pending_review"
+                    if audit:
+                        audit.write("editorial_patch_applied", review_stage="acceptance",
+                                    requested_fixes=editorial_notes)
+                except Exception as exc:
+                    if audit:
+                        audit.write("editorial_patch_rejected", review_stage="acceptance", error=str(exc))
+                    if progress:
+                        progress("提醒：后验收文字规范未完成，保留通过剧情验收的版本和提醒")
+    elif audit:
+        audit.write("acceptance_skipped", reason="初审未触发有效重写")
+    if audit:
+        audit.write("final_plan_selected", source=final_source,
+                    validation_status=validation_status,
+                    review_issues_count=len(review_issues), editorial_notes=all_editorial_notes, plan=data)
+    all_editorial_notes.extend({"scope": "规划建议", "problem": note,
+                                "review_stage": "structure_advisory"}
+                               for note in _chapter_plan_advisories(data))
+    title = _plan_title(data.get("title"), settings.get("chapter_number"))
+    if audit:
+        audit.write("plan_title_normalized", chapter_number=settings.get("chapter_number"),
+                    model_title=data.get("title"), chapter_title=title)
     beats = _parse_beats(json.dumps(data.get("beats"), ensure_ascii=False), num_beats)
     if not title or len(beats) != num_beats:
         raise ValueError("章节规划缺少回目或分幕数量不符。")
-    return {"chapter_title": title, "beats": beats}
+    return {"chapter_title": title, "beats": beats,
+            "planning_review": {"status": validation_status, "source": final_source,
+                                "editorial_notes": all_editorial_notes}}
 
 
 def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                         issues: str, previous_context: str = "",
-                        wiki_history: str = "") -> dict:
+                        wiki_history: str = "",
+                        progress: Callable[[str], None] | None = None, audit=None) -> dict:
     """按用户指出的问题定向修订现有规划，不直接覆盖已保存计划。"""
     current_beats = settings.get("beats") or []
     if not current_beats:
@@ -1019,7 +1383,11 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         "title": str(settings.get("chapter_title") or "").strip(),
         "beats": current_beats,
     }
-    prompt = f"""你是长篇小说的章节结构编辑。请针对用户指出的问题，修订现有章节规划。
+    from core.agent_skill import skill_guidance
+    guidance = skill_guidance("chapter-planning", "repair", audit, "user_plan_revision")
+    prompt = f"""{guidance}
+
+程序指定目标为第 {settings.get('chapter_number', '')} 章；title 只输出回目文字，不含章号。
 
 这是一项定向修订，不是从零规划：保留没有被问题影响的幕、人物线、有效线索和节奏；只修改解决问题所必需的部分。若调整一幕会影响后续幕，必须同步修正其时间、人物已知信息和结尾状态。
 
@@ -1032,8 +1400,8 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {settings.get('background', '')}
 【全书附加规则】
 {settings.get('extra_requirements', '')}
-【上一章有效摘要与正文结尾】
-{previous_context[:3500] or '（未提供）'}
+【近期连续性上下文】
+{previous_context[:7500] or '（未提供）'}
 【最近 Wiki 原文依据】
 {wiki_history[:2200] or '（未提供）'}
 【本章目标】
@@ -1044,13 +1412,15 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 修订规则：
 1. 必须逐项解决用户指出的问题；问题之间冲突时，优先保证原文事实、时间线和人物信息权限。
 2. 不得删除未被问题影响的重要情节，也不得借修订引入另一套无关剧情。
-3. 第一幕必须承接上一章结尾；全章最多两条主要人物线、两个主要视角。
+3. 第一幕须与上一章保持可解释的时间线或事件连续性，允许自然切换人物线；通常聚焦一至两条主要人物线，必要时可增加视角。
 4. 每幕必须推进新事件并产生明确结束状态，不得用不同措辞重复同一功能。
-5. 允许保留或调整原规划中的新增元素；全章主要新增元素仍不得超过一个。
+5. 允许保留或调整原规划中的新增元素，通常聚焦一个，但不以数量限制合理创作；普通线索材料放入 new_facts 即可。
 6. 在内部逐项自检问题点，但不要输出分析、自检报告或修改说明，只输出修订后的完整规划。
+7. 动态上下文中已经完成的内容不得原样重演；章末状态是修订起点，若发生变化必须保留自然过程。若分幕记录与正文摘要冲突，以正文摘要和正文结尾为准。
+8. 根据上一章开头定位和结尾状态承接时间，次日不能沿用前一日日期；倒叙或并行场景须明确说明，无法确定日期时用相对时间。情绪未解决不等于既有信息尚未告知，不得把新态度写成首次获知。
 
 输出严格 JSON 对象：
-{{"title":"本章回目","beats":[{{"num":"一","name":"幕名","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕通过可见渠道获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"人物/地点/物品/组织/线索","source_or_entry":"如何自然进入当前剧情","future_use":"后续用途"}}],"desc":"本幕具体事件","end_state":"幕末人物、地点与未完成事件"}}]}}。
+{{"title":"本章回目","beats":[{{"num":"一","name":"幕名","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"简短类别","source_or_entry":"如何自然进入当前剧情","future_use":"后续用途"}}],"desc":"本幕具体事件","end_state":"幕末状态与未完成线索"}}]}}。
 没有主要新增元素的幕输出 "new_elements":[]；恰好 {num_beats} 幕。只输出 JSON。"""
     data = None
     parse_error = None
@@ -1059,10 +1429,14 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             "上次修订未通过结构或连续性检查：" +
             "；".join(parse_error or ["JSON 无效"]) +
             "。请保持定向修订，修正后直接输出完整 JSON。\n\n" + prompt)
+        if audit:
+            audit.write("model_request", stage="user_plan_revision", attempt=attempt + 1, prompt=request)
         raw = llm.complete(
             request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
             temperature=0.3 if attempt == 0 else 0.1,
             num_predict=max(2400, num_beats * 460), disable_thinking=True)
+        if audit:
+            audit.write("model_response", stage="user_plan_revision", attempt=attempt + 1, raw_response=raw)
         try:
             data = _first_json_object(raw)
             parse_error = _chapter_plan_issues(data, num_beats, previous_context)
@@ -1074,51 +1448,72 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     if data is None:
         raise ValueError("章节规划修订未通过：" +
                          "；".join(parse_error or ["模型未返回章节规划 JSON"]))
-    title = str(data.get("title") or "").strip()
+    title = _plan_title(data.get("title"), settings.get("chapter_number"))
     beats = _parse_beats(json.dumps(data.get("beats"), ensure_ascii=False), num_beats)
     if not title or len(beats) != num_beats:
         raise ValueError("修订后的章节规划缺少回目或分幕数量不符。")
     return {"chapter_title": title, "beats": beats}
 
 
+def _plan_title(value, chapter_number=None):
+    """回目仅保留标题文字，兼容模型仍输出旧编号的情况。"""
+    title = str(value or "").strip()
+    if not title:
+        return title
+    title = re.sub(r"^第\s*[\d零〇一二三四五六七八九十百千万两]+\s*[章回节]\s*[：:·.、—-]*\s*", "", title)
+    title = re.sub(r"^chapter\s+\d+\s*[:.\-–—]*\s*", "", title, flags=re.IGNORECASE).strip()
+    if not title:
+        raise ValueError("章节规划缺少回目文字")
+    return title
+
+
 def _chapter_plan_issues(data: dict, num_beats: int, previous_context: str) -> list[str]:
-    """对模型规划做轻量结构与连续性检查，失败时交给模型重写一次。"""
+    """对模型规划做轻量结构检查，失败时交给模型重写一次。"""
     issues = []
     beats = data.get("beats") if isinstance(data, dict) else None
     if not isinstance(beats, list) or len(beats) != num_beats:
         return [f"必须恰好输出 {num_beats} 幕"]
-    povs = []
-    required = ("pov", "time", "location", "known_before", "new_facts", "desc", "end_state")
-    new_elements = []
+    if not str(data.get("title") or "").strip():
+        issues.append("章节规划缺少回目文字")
+    required = ("desc",)
     for index, beat in enumerate(beats, 1):
         if not isinstance(beat, dict):
             issues.append(f"第 {index} 幕不是对象")
             continue
         missing = [key for key in required if not beat.get(key)]
-        if "new_elements" not in beat or not isinstance(beat.get("new_elements"), list):
-            missing.append("new_elements")
+        if beat.get("desc") and (not isinstance(beat["desc"], str) or not beat["desc"].strip()):
+            issues.append(f"第 {index} 幕 desc 必须是有效文本")
+        for key in ("known_before", "new_facts", "new_elements"):
+            if key in beat and not isinstance(beat[key], list):
+                issues.append(f"第 {index} 幕字段 {key} 必须是数组")
         if missing:
             issues.append(f"第 {index} 幕缺少字段：{','.join(missing)}")
-        for element in beat.get("new_elements") or []:
+        elements = beat.get("new_elements")
+        for element in elements if isinstance(elements, list) else []:
             if not isinstance(element, dict):
                 issues.append(f"第 {index} 幕新增元素不是对象")
                 continue
-            element_missing = [key for key in ("name", "type", "source_or_entry", "future_use")
-                               if not str(element.get(key) or "").strip()]
-            if element_missing:
-                issues.append(f"第 {index} 幕新增元素缺少字段：{','.join(element_missing)}")
-            new_elements.append(element)
-        pov = str(beat.get("pov") or "").strip()
-        if pov and pov not in povs:
-            povs.append(pov)
-    if len(povs) > 2:
-        issues.append(f"主要视角超过两个：{'、'.join(povs)}")
-    if len(new_elements) > 1:
-        issues.append(f"主要新增元素超过一个：{len(new_elements)} 个")
-    first_pov = str((beats[0] or {}).get("pov") or "").strip() if beats else ""
-    if first_pov and first_pov not in previous_context:
-        issues.append(f"第一幕视角人物“{first_pov}”未出现在上一章上下文")
     return issues
+
+
+def _chapter_plan_advisories(data):
+    """创作建议不参与结构失败与自动重试。"""
+    notes, povs, elements = [], set(), []
+    for index, beat in enumerate(data.get("beats") or [], 1):
+        if not isinstance(beat, dict):
+            continue
+        if beat.get("pov"):
+            povs.add(str(beat["pov"]))
+        for key in ("pov", "time", "location", "end_state"):
+            if not beat.get(key):
+                notes.append(f"第{index}幕未说明{key}，按需补充")
+        if isinstance(beat.get("new_elements"), list):
+            elements.extend(beat["new_elements"])
+    if len(povs) > 2:
+        notes.append("视角多于两个，请留意叙事聚焦；不阻止生成")
+    if len(elements) > 1:
+        notes.append("登记的主要新增元素多于一个，请区分主要设定与普通线索；不阻止生成")
+    return notes
 
 
 def _parse_beats(raw: str, num_beats: int) -> list:

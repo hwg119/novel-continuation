@@ -34,5 +34,5 @@ export function writeOptions(method: string, data?: unknown): RequestInit {
 
 export type Job = { id: string; kind: string; status: string; message: string;
   created_at?: string;
-  events: { time: string; message: string; data: Record<string, unknown> }[];
+  events: { time: string; message: string; level?: 'info' | 'success' | 'error'; data: Record<string, unknown> }[];
   result: Record<string, unknown> | null }

@@ -25,3 +25,4 @@ corpus_txt/
 _*
 tests/*
 scripts/*
+qa/*

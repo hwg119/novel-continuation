@@ -336,12 +336,14 @@ quote 必须逐字复制原文中连续出现的一段最短引句，不超过 1
         num_predict = max(2400, int(configured or 2400))
         cfg = getattr(llm, "cfg", {})
         model_name = str(cfg.get("model_name", "")).lower()
-        disable_thinking = (str(cfg.get("interface_format", "")).lower() == "openai"
+        disable_thinking = (str(cfg.get("interface_format", "")).lower() == "deepseek" or
+                           (str(cfg.get("interface_format", "")).lower() == "openai"
                             and (model_name == "minimax-m3" or
+                                 model_name == "deepseek-flash" or
                                  model_name.startswith("mimo-v2.6-") or
                                  model_name.startswith(("qwen3.5-", "qwen3.6-",
                                                         "qwen3.7-", "qwen3.8-",
-                                                        "deepseek-v4", "glm-5.3"))))
+                                                        "deepseek-v4", "glm-5.3")))))
         blocked = None
         for attempt in (1, 2):
             request_prompt = prompt if attempt == 1 else (
@@ -363,7 +365,8 @@ quote 必须逐字复制原文中连续出现的一段最短引句，不超过 1
                     audit.write("chunk_response", chapter=number, chunk=index,
                                 attempt=attempt,
                                 elapsed_ms=round((time.monotonic() - started) * 1000),
-                                raw_response=raw)
+                                raw_response=raw,
+                                response_diagnostics=getattr(llm, "last_response_diagnostics", {}))
                 data = _extract_json(raw)
                 break
             except Exception as exc:
