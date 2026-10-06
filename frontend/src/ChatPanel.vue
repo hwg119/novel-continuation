@@ -27,6 +27,14 @@ const input = ref('')
 const sender = ref<InstanceType<typeof XSender>>()
 onMounted(() => { void nextTick(() => sender.value?.focus('last')) })
 function focusChatInput() { void nextTick(() => sender.value?.focus('last')) }
+function focusComposerBlank(event: MouseEvent) {
+  const target = event.target
+  if (busy.value || !(target instanceof Element)) return
+  // Keep native caret placement, text selection and button clicks intact.
+  if (target.closest('button, a, input, textarea, select, [contenteditable="true"]')) return
+  if (window.getSelection()?.isCollapsed === false) return
+  focusChatInput()
+}
 const composing = ref(false)
 function inputChanged() { input.value = sender.value?.getModelValue().text || '' }
 function guardComposition(event: KeyboardEvent) {
@@ -245,7 +253,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
           <template v-for="action in quickActions" :key="action.label"><a v-if="action.view" :href="routePath(action.view as View, projectId, chapterState.number)">{{ action.label }}</a><button v-else type="button" class="subtle" :disabled="busy || !!running" @click="sendText(action.prompt)">{{ action.label }}</button></template>
         </template><span v-else>{{ targetChapter() ? '章节状态暂不可用' : '选择章号后显示快捷操作' }}</span>
       </div>
-      <div class="chat-composer" @keydown.capture="guardComposition" @compositionstart="composing = true" @compositionend="composing = false">
+      <div class="chat-composer" @click.capture="focusComposerBlank" @keydown.capture="guardComposition" @compositionstart="composing = true" @compositionend="composing = false">
         <XSender ref="sender" variant="updown" submit-type="enter" :max-length="5000" :tip-config="false"
           :disabled="busy" :loading="busy || !!running" :custom-style="{ minHeight: '76px', maxHeight: '220px' }"
           placeholder="说说你想做什么；指定章号可以避免指代不清。" @change="inputChanged" @submit="send">

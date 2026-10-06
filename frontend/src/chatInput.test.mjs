@@ -15,6 +15,15 @@ test('new conversation and send use explicit chat button styles', () => {
   assert.match(component, /\.chat-button:focus-visible/)
 })
 
+test('composer blank areas focus the editor without hijacking controls or selection', () => {
+  const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
+  assert.match(component, /@click.capture="focusComposerBlank"/)
+  const handler = component.split('function focusComposerBlank(event: MouseEvent)')[1].split('const composing')[0]
+  assert.match(handler, /target.closest\('button, a, input, textarea, select, \[contenteditable="true"\]'\)/)
+  assert.match(handler, /getSelection\(\)\?\.isCollapsed === false/)
+  assert.match(handler, /focusChatInput\(\)/)
+})
+
 test('entering the chat page focuses the sender after mounting', () => {
   const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
   assert.match(component, /onMounted\(\(\) => \{ void nextTick\(\(\) => sender.value\?\.focus\('last'\)\)/)
