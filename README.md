@@ -88,11 +88,9 @@ python web_main.py
 
 修订默认一次生成必要段落的局部补丁，保护其他正文；增删段落或大幅调整情节、文风时可切换整章重写。只执行用户填写或导入的要求，验收不另行增加新建议。补丁和验收结果均可在完整修订日志回看，候选稿仍需确认后应用。
 
-分幕、续写、故事审校、执行修订的方法分别维护在 `agent_skills/chapter-planning`、`chapter-writing`、`story-audit` 和 `chapter-revision`。运行器按用途加载 Skill 与当前步骤的参考，日志记录版本、请求、回复及核验结果；上下文检索、保存与恢复仍由原有代码负责。默认整体审校一次，仅在重要历史疑问需要依据时按需查证，不默认提取全文断言并逐个判定疑点。
+分幕、续写、故事审校、执行修订的方法分别维护在 `agent_skills/chapter-planning`、`chapter-writing`、`story-audit` 和 `chapter-revision`。运行器按用途加载 Skill 与当前步骤的参考，日志记录版本、请求、回复及核验结果；上下文检索、保存与恢复由项目运行时统一管理。默认整体审校一次，仅在重要历史疑问需要依据时按需查证，不默认提取全文断言并逐个判定疑点。
 
 “修订方式”中的可选表达润色使用 `agent_skills/prose-polish`，处理泛化描写、重复解释与同质化对白，保留剧情事实、线索和人物声音。它不判断作者来源，不自动在续写或修订后调用；润色稿仍需比较、确认应用并保存。修订稿须先应用到正文编辑器，才能针对它润色。
-
-Skill 方法参考了 [awesome-novel-agent](https://github.com/modoojunko/awesome-novel-agent) 的写作与润色分工、场景推进和人物声音等思路；这里独立编写适配既有工程的指令，不照搬其禁词表、评分阈值或多轮循环。
 
 回目与分幕规划使用 LangGraph 保存各阶段检查点。规划审查试点支持模型按需搜索历史正文、打开章节片段，再依据证据给出结论；信息足够时直接结束，不强制查阅。查阅轮数有上限，完整请求、返回证据、来源位置、决策及耗时保存在工程规划日志中，便于复盘效果与成本。当前主动搜索采用关键词，不依赖向量库。失败或中断后，可在运行记录中确认原模型并继续；已完成阶段无需重新调用。工程设定、历史正文或摘要变化后须重新规划。恢复完成的规划可在运行记录中确认保存到对应章节的续写设定，旧任务没有检查点时须重新生成。
 
@@ -147,12 +145,8 @@ npm run test:diff --prefix frontend
 npm run test:routes --prefix frontend
 ```
 
-## 项目参考
-
-本项目包含基于 [AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator)（AGPL-3.0）演进的代码。相关版权、来源与许可说明见 [NOTICE](NOTICE)。
-
 ## 许可证
 
-本项目采用 [GNU Affero General Public License v3.0](LICENSE)。来源与归属说明见 [NOTICE](NOTICE)，当前审计依据和发布注意事项见 [docs/LICENSE_AUDIT.md](docs/LICENSE_AUDIT.md)。
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)。第三方许可与归属信息见 [NOTICE](NOTICE)。
 
 用户自行导入或创作的小说文本不会仅因使用本软件而自动适用 AGPL；模型供应商条款和所在地法律仍需用户自行确认。
