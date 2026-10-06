@@ -15,6 +15,14 @@ test('new conversation and send use explicit chat button styles', () => {
   assert.match(component, /\.chat-button:focus-visible/)
 })
 
+test('task actions and chapter selector share the workbench styling', () => {
+  const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
+  assert.match(component, /class="chat-button"[^>]*@click="confirm\(event\)"/)
+  assert.match(component, /class="chat-button"[^>]*@click="savePlan\(event\)"/)
+  assert.match(component, /\.chat-context input\{[^}]*border-radius:6px/)
+  assert.match(component, /\.chat-context input:focus\{/)
+})
+
 test('composer blank areas focus the editor without hijacking controls or selection', () => {
   const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
   assert.match(component, /@click.capture="focusComposerBlank"/)
@@ -44,6 +52,8 @@ test('conversation management is behind an accessible hover menu', () => {
   assert.match(component, /@media\(hover:none\)/)
   assert.match(component, /await ElMessageBox.prompt\(/)
   assert.match(component, /await ElMessageBox.confirm\(/)
+  assert.equal((component.match(/customClass: 'chat-project-dialog'/g) || []).length, 2)
+  assert.match(component, /\.el-message-box\.chat-project-dialog/)
   assert.doesNotMatch(component, /window\.(confirm|prompt)\(/)
 })
 

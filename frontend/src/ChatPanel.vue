@@ -131,6 +131,7 @@ async function renameSession(session: Session) {
   managingSession.value = true
   try {
     const { value } = await ElMessageBox.prompt('请输入新的对话名称', '重命名对话', {
+      customClass: 'chat-project-dialog', modalClass: 'chat-project-dialog-backdrop',
       inputValue: session.title, confirmButtonText: '保存', cancelButtonText: '取消',
       inputValidator: (value: string) => (value.trim().length >= 1 && value.trim().length <= 80) || '名称需为 1～80 个字符',
       closeOnClickModal: false,
@@ -149,6 +150,7 @@ async function deleteSession(session: Session) {
   managingSession.value = true
   try {
     await ElMessageBox.confirm(`确定删除对话“${session.title}”？小说正文与运行记录不受影响，已启动的后台任务仍会继续运行。`, '删除对话', {
+      customClass: 'chat-project-dialog', modalClass: 'chat-project-dialog-backdrop',
       confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning', closeOnClickModal: false,
     })
     if (project !== props.projectId) return
@@ -238,10 +240,10 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
             <summary><span class="chat-process-title">&gt;_ 处理过程 · {{ event.data.label }}</span><small>{{ processStates[event.data.status] || event.data.status }} · {{ event.data.entries.length }} 条</small><span class="chat-process-latest">{{ event.data.entries.at(-1)?.text || '等待第一条日志' }}</span></summary>
             <div class="chat-process-log" role="log" aria-label="处理日志"><div v-for="entry in event.data.entries" :key="entry.id" class="chat-process-line" :class="entry.level"><time>{{ entry.time || '—' }}</time><span>{{ entry.level === 'error' ? 'ERR' : entry.level === 'success' ? 'OK' : 'INFO' }}</span><div>{{ entry.text }}<small v-if="Object.keys(entry.details).length">{{ logDetails(entry) }}</small></div></div><p v-if="!event.data.entries.length">任务已开始，等待进度日志。</p></div>
           </details>
-          <template v-else-if="event.kind === 'action'"><small>待执行操作 · 第 {{ event.data.chapter }} 章 · {{ event.data.model }}</small><h3>{{ labels[event.data.tool] }}</h3><p>{{ event.data.message }}</p><p v-if="event.data.requirements">{{ event.data.requirements }}</p><button :disabled="actionHandled(event.data.action_id) || !!confirming" @click="confirm(event)">{{ actionHandled(event.data.action_id) ? '已处理' : confirming === event.data.action_id ? '启动中…' : '执行' }}</button></template>
+          <template v-else-if="event.kind === 'action'"><small>待执行操作 · 第 {{ event.data.chapter }} 章 · {{ event.data.model }}</small><h3>{{ labels[event.data.tool] }}</h3><p>{{ event.data.message }}</p><p v-if="event.data.requirements">{{ event.data.requirements }}</p><button type="button" class="chat-button" :disabled="actionHandled(event.data.action_id) || !!confirming" @click="confirm(event)">{{ actionHandled(event.data.action_id) ? '已处理' : confirming === event.data.action_id ? '启动中…' : '执行' }}</button></template>
           <template v-else-if="event.kind === 'task_result'"><strong>{{ event.data.status === 'completed' ? '任务完成' : '任务未完成' }}</strong><p>{{ event.data.text }}</p>
             <details v-if="event.data.result?.beats?.length"><summary>查看候选分幕 · {{ event.data.result.chapter_title }}</summary><section v-for="beat in event.data.result.beats" :key="beat.num"><h4>{{ beat.name }}</h4><p>{{ beat.desc }}</p></section><p>{{ event.data.result.planning_review?.summary }}</p></details>
-            <button v-if="event.data.status === 'completed' && event.data.result?.beats?.length" :disabled="planSaved(event.data.action_id) || saving === event.data.action_id" @click="savePlan(event)">{{ planSaved(event.data.action_id) ? '已保存分幕' : saving === event.data.action_id ? '保存中…' : '保存分幕' }}</button>
+            <button v-if="event.data.status === 'completed' && event.data.result?.beats?.length" type="button" class="chat-button" :disabled="planSaved(event.data.action_id) || saving === event.data.action_id" @click="savePlan(event)">{{ planSaved(event.data.action_id) ? '已保存分幕' : saving === event.data.action_id ? '保存中…' : '保存分幕' }}</button>
             <details v-if="event.data.result?.report || event.data.result?.candidate"><summary>查看结果内容</summary><p>{{ event.data.result.report || event.data.result.candidate }}</p></details>
             <a v-if="event.data.chapter" :href="link(event.data)">{{ event.data.result?.beats?.length ? '打开续写与分幕' : '查看结果' }} →</a></template>
           <template v-else-if="event.kind === 'link'"><a class="chat-feature-link" :href="link(event.data)">{{ event.data.label }} →</a></template>
@@ -277,7 +279,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-desk{min-width:0;min-height:0;display:flex;flex-direction:column}.chat-desk>header{flex-shrink:0}
 .chat-desk h1{font-family:var(--font-display,serif);font-size:26px;margin:6px 0 8px}.chat-desk header p{color:#688486;margin:5px 0 10px}
 .chat-context{display:flex;gap:20px;align-items:center;flex-wrap:wrap;border-block:1px solid #d4e1dd;padding:10px 0;flex-shrink:0}
-.chat-context label{display:flex;gap:10px;align-items:center}.chat-context input{width:95px;padding:6px}.chat-context small{margin-left:auto;color:#698585}
+.chat-context label{display:flex;gap:10px;align-items:center}.chat-context input{width:95px;min-height:38px;padding:7px 10px;border:1px solid #cbdad2;border-radius:6px;background:#fbfdfb;color:#263a40;font:inherit;accent-color:#326b59;transition:border-color .15s,box-shadow .15s}.chat-context input:hover{border-color:#92b6a6}.chat-context input:focus{outline:none;border-color:#79a998;box-shadow:0 0 0 2px #79a99833}.chat-context small{margin-left:auto;color:#698585}
 .chat-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0;flex-shrink:0;font-size:12px;color:#698585}
 .chat-chapter-state{margin-right:auto}.chat-shortcuts button,.chat-shortcuts a{border:1px solid #bed4ca;border-radius:18px;padding:5px 12px;color:#356b59;background:#f8fbf9;font-size:12px;text-decoration:none}.chat-shortcuts button:hover:not(:disabled),.chat-shortcuts a:hover{background:#e1eeea}
 .chat-transcript{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;padding:10px 12px 16px 0;scroll-padding-bottom:16px}
@@ -286,6 +288,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-entry{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px 0;margin:8px 0;line-height:1.8}.chat-entry p{margin:0}
 .chat-entry.user{width:fit-content;max-width:80%;background:#e5efec;padding:10px 16px;margin-left:auto;margin-right:0;border-radius:12px 12px 0 12px;text-align:left}
 .chat-session-row{position:relative;margin-bottom:12px;min-width:0}.chat-session-row>.chat-session{padding-right:36px}
+.chat-session{border-radius:8px;transition:background .15s,border-color .15s}.chat-session:hover{background:#edf4ef;border-color:#cbdad2}.chat-session:focus-visible,.chat-session-menu button:focus-visible,.chat-more-trigger:focus-visible,.chat-shortcuts button:focus-visible,.chat-shortcuts a:focus-visible{outline:2px solid #79a998;outline-offset:2px}.chat-session-menu button:disabled,.chat-shortcuts button:disabled{opacity:.45;cursor:not-allowed}.chat-entry.task_result>.chat-button{margin-top:14px}
 .chat-session-more{position:absolute;right:6px;top:8px;z-index:2}.chat-more-trigger{opacity:0;padding:0 6px;background:transparent;color:#52796b;border:0;font-size:24px;line-height:28px;border-radius:5px}.chat-session-row:hover .chat-more-trigger,.chat-session-row:focus-within .chat-more-trigger,.chat-session-more.open .chat-more-trigger{opacity:1}.chat-more-trigger:hover{background:#d5e8df}.chat-session-menu{position:absolute;right:0;top:32px;min-width:100px;padding:5px;background:#fff;border:1px solid #cadbd4;border-radius:7px;box-shadow:0 5px 16px #193a3320}.chat-session-menu button{display:block;width:100%;padding:6px 12px;text-align:left;border:0;border-radius:4px;background:transparent;color:#52796b;font-size:13px}.chat-session-menu button:hover{background:#e5efec}@media(hover:none){.chat-more-trigger{opacity:1}}
 .chat-feature-link{display:inline-flex;align-items:center;padding:8px 16px;border:1px solid #bed4ca;border-radius:8px;background:#e5efec;color:#356b59;text-decoration:none;font-weight:600}.chat-feature-link:hover{background:#d5e8df}.chat-feature-link:focus-visible{outline:2px solid #79a998;outline-offset:2px}
 .chat-entry.progress,.chat-entry.task_progress{font-size:14px;color:#698585;padding:2px 0}
@@ -298,4 +301,26 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-composer :deep(.elx-x-sender){display:block;border-radius:10px;background:#fff}.chat-composer :deep(.elx-x-sender):focus-within{outline:2px solid #79a998;outline-offset:2px}
 @media(max-height:750px){.chat-desk>header{display:none}.chat-workbench{padding-block:12px}.chat-composer-note{display:none}}
 @media(max-width:800px){.chat-workbench{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);padding:10px 14px;gap:10px}.chat-sessions{border-right:0;display:flex;gap:8px;overflow:auto;max-height:76px;padding:0}.chat-session{min-width:150px;margin:0;padding:9px}.chat-session-head{min-width:120px;margin:0}.chat-desk>header{display:none}.chat-context{gap:12px}.chat-chapter-state{width:100%}.chat-composer .chat-key-hint{display:none}.chat-shortcuts{padding:6px 0}.chat-transcript{padding-top:4px}}
+</style>
+
+<!-- MessageBox is teleported to body; scope these styles with its custom class. -->
+<style>
+.chat-project-dialog-backdrop{background:#102a31ad;backdrop-filter:blur(2px)}
+.el-message-box.chat-project-dialog{width:min(500px,calc(100vw - 40px));max-width:500px;padding:24px;border:1px solid #cbdad2;border-radius:8px;background:#fbfdfb;box-shadow:0 24px 80px #071e2652;font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;--el-color-primary:#326b59;--el-color-primary-light-3:#5b8f77;--el-color-primary-light-9:#edf4ef;--el-border-color:#cbdad2;--el-text-color-primary:#183f3a;--el-text-color-regular:#587069}
+.chat-project-dialog .el-message-box__header{padding:0 26px 14px 0}
+.chat-project-dialog .el-message-box__title{color:#183f3a;font:600 24px/1.25 "KaiTi","STKaiti",serif}
+.chat-project-dialog .el-message-box__headerbtn{top:18px;right:18px}
+.chat-project-dialog .el-message-box__content{padding:0;color:#587069;font-size:14px;line-height:1.75}
+.chat-project-dialog .el-message-box__message p{margin:0;line-height:1.75}
+.chat-project-dialog .el-message-box__status{color:#92703e}
+.chat-project-dialog .el-message-box__input{padding-top:16px}
+.chat-project-dialog .el-input__wrapper{min-height:40px;background:#fff;box-shadow:0 0 0 1px #cbdad2 inset;border-radius:6px}
+.chat-project-dialog .el-input__wrapper.is-focus{box-shadow:0 0 0 2px #79a998 inset}
+.chat-project-dialog .el-input__inner{color:#263a40;font-size:14px}
+.chat-project-dialog .el-message-box__btns{gap:9px;margin-top:22px;padding:14px 0 0;border-top:1px solid #e0e9e4}
+.chat-project-dialog .el-message-box__btns .el-button{min-width:106px;height:38px;margin:0;padding:9px 16px;border:1px solid #cbdad2;border-radius:6px;background:#edf4ef;color:#356b59;font-family:inherit;font-size:14px}
+.chat-project-dialog .el-message-box__btns .el-button:hover{background:#e1eeea;border-color:#92b6a6}
+.chat-project-dialog .el-message-box__btns .el-button--primary{background:#326b59;border-color:#326b59;color:#fff}
+.chat-project-dialog .el-message-box__btns .el-button--primary:hover{background:#275847;border-color:#275847}
+.chat-project-dialog .el-message-box__btns .el-button:focus-visible{outline:2px solid #79a998;outline-offset:3px}
 </style>
