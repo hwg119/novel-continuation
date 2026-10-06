@@ -1,0 +1,48 @@
+{
+  "name": "雾港来信（演示）",
+  "source_novel": "原创演示短篇《雾港来信》",
+  "language": "zh",
+  "traditional": false,
+  "background": "临海小城雾港每晚九点鸣响旧灯塔的雾笛。二十年前灯塔停用，但邮局仍会偶尔收到盖着旧灯塔邮戳、没有寄件人的信。修复师林澈回乡整理外祖父留下的钟表铺，与邮递员苏遥一起调查这些信。故事保持克制的现实质感，只让超自然现象留下可验证但不完全解释的痕迹。",
+  "chapter_number": 6,
+  "chapter_title": "潮汐表的空白一页",
+  "chars_per_beat": 500,
+  "beats_per_chapter": 6,
+  "temperature": 0.75,
+  "llm_config_name": "",
+  "system_prompt": "你是一位悬疑幻想小说作者。延续克制、清晰、重视物证与人物选择的叙事，只输出正文。",
+  "style_sample": {"chapter": 1, "start": 0, "length": 450},
+  "beats": [
+    {"num": "一", "name": "缺页", "desc": "林澈在外祖父的潮汐表中发现被整齐裁去的一页，残留日期与蓝信封邮戳一致。"},
+    {"num": "二", "name": "退回的邮件", "desc": "苏遥查到二十年前同一天有三封邮件因地址不存在被退回，其中一封收件人正是钟表铺。"},
+    {"num": "三", "name": "旧堤仓库", "desc": "两人循退件章前往旧堤仓库，只找到一台停在九点零七分的船钟。"},
+    {"num": "四", "name": "阿芹的证词", "desc": "阿芹承认外祖父曾让她保管一封不能提前投递的信，但信已在十年前失踪。"},
+    {"num": "五", "name": "九点零七分", "desc": "林澈修好船钟后，钟内掉出半张潮汐表，证明灯塔事故时记录被人改过。"},
+    {"num": "六", "name": "下一位收件人", "desc": "当晚雾笛响起，邮局分拣台上出现新信，收件人写着苏遥。"}
+  ],
+  "chapter_brief": "调查蓝信封与二十年前灯塔事故的联系，让线索从传闻推进到可核对的时间记录。",
+  "chapter_requirements": "不要直接解释超自然来源；林澈与苏遥必须共同完成关键推理；结尾留下针对苏遥的新风险。",
+  "chapter_plans": {
+    "6": {
+      "chapter_title": "潮汐表的空白一页",
+      "chapter_brief": "调查蓝信封与二十年前灯塔事故的联系。",
+      "chapter_requirements": "保留超自然悬念，所有关键判断必须有物证支持。",
+      "beats": [
+        {"num": "一", "name": "缺页", "desc": "林澈在潮汐表中发现被裁去的一页。"},
+        {"num": "二", "name": "退回的邮件", "desc": "苏遥查到二十年前的三封退件。"},
+        {"num": "三", "name": "旧堤仓库", "desc": "两人在仓库找到停摆的船钟。"},
+        {"num": "四", "name": "阿芹的证词", "desc": "阿芹说出被托管信件的往事。"},
+        {"num": "五", "name": "九点零七分", "desc": "船钟内的纸片补全事故时间。"},
+        {"num": "六", "name": "下一位收件人", "desc": "一封写给苏遥的新信出现。"}
+      ]
+    }
+  },
+  "illustration_style": "auto",
+  "illustration_method": "free",
+  "illustration_style_notes": "雾蓝、旧纸与暖黄灯光",
+  "forbidden_words": [],
+  "character_voices": "林澈说话谨慎，习惯先确认事实；苏遥直接敏锐，但不轻率下结论；阿芹寡言，常用具体动作回避问题。",
+  "extra_requirements": "线索必须可回溯到正文原句。",
+  "closing_formula": "以一件日常物品出现细微异常收束。",
+  "last_generated_chapter": 5
+}

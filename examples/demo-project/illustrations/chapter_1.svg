@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <title id="title">雾港来信</title><desc id="desc">雾中的钟表铺、蓝信封与远处灯塔</desc>
+  <defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#173348"/><stop offset="1" stop-color="#78929a"/></linearGradient><radialGradient id="lamp"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#d69242" stop-opacity="0"/></radialGradient></defs>
+  <rect width="1200" height="720" fill="url(#sky)"/><path d="M0 500 Q230 420 450 500 T900 480 T1200 500 V720 H0Z" fill="#263f49"/><circle cx="930" cy="190" r="130" fill="url(#lamp)"/>
+  <path d="M900 500 L940 170 L980 500Z" fill="#1c2d35"/><rect x="916" y="210" width="48" height="28" rx="4" fill="#ffd886"/><path d="M964 223 L1190 150 L1190 290Z" fill="#ffe9aa" opacity=".12"/>
+  <rect x="130" y="300" width="470" height="310" rx="8" fill="#17272d"/><rect x="190" y="370" width="150" height="170" fill="#d5a65f" opacity=".7"/><rect x="385" y="370" width="150" height="170" fill="#d5a65f" opacity=".45"/>
+  <g transform="translate(520 560) rotate(-7)"><rect x="0" y="0" width="260" height="145" rx="5" fill="#b9d8df"/><path d="M0 0 L130 82 L260 0" fill="none" stroke="#587e88" stroke-width="5"/><circle cx="130" cy="80" r="18" fill="#315d6c"/></g>
+  <g fill="#d8e2df" opacity=".2"><ellipse cx="250" cy="230" rx="350" ry="90"/><ellipse cx="750" cy="360" rx="500" ry="95"/></g>
+</svg>

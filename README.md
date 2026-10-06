@@ -1,12 +1,54 @@
-# 小说续写工作台（novel-continuation）
+# 小说续写工作台
 
-面向已有小说的本机续写工具。工作台采用 Vue + FastAPI，复用 Python 续写、检索和审校逻辑。一本书对应一个工程目录，正文和设定均保存在本机。
+> 面向长篇小说的本地 AI 写作工作台：记住前文、管理设定、规划后续，让每次修改都可核对、可回退。
 
-## 启动 Web 工作台
+小说续写工作台不是一个只有“生成下一段”的聊天框。它围绕长篇创作提供正文管理、分幕规划、小说 Wiki、历史查证、人物关系、故事审校和可比较修订；一本书对应一个本机工程目录，正文、设定和运行记录默认留在你的电脑上。
 
-需要 Python 和 Node.js。首次运行：
+![工作台首页：演示工程概览](assets/screenshots/home.png)
+
+## 为什么使用它
+
+- **长篇记忆有依据**：从原文整理 Wiki，人物状态和关系都能回到章节引文。
+- **先规划，再续写**：分幕规划会按需查阅历史正文，信息不足时保留疑问而不是编造答案。
+- **修改不覆盖原稿**：候选稿可以逐段比较、编辑和验收，确认后才应用到正文。
+- **本地优先**：小说工程、密钥和日志保存在本机；支持云端模型，也支持 Ollama。
+- **完整创作工作流**：从母本导入、续写、审校、润色到插图和 Word 导出集中在一个界面。
+
+| 正文与插图 | 有原文证据的 Wiki | 人物关系图 |
+| --- | --- | --- |
+| ![正文阅读与章节插图](assets/screenshots/chapter.png) | ![小说 Wiki](assets/screenshots/wiki.png) | ![人物关系图](assets/screenshots/relationships.png) |
+
+## 快速体验
+
+需要预先安装 Python 3.10+ 和 Node.js 20+。启动器会自动创建虚拟环境、安装缺失依赖、构建前端、检查端口并打开浏览器。
+
+### Windows
+
+克隆或下载项目后双击 `start.bat`。也可以在 PowerShell 中运行：
 
 ```powershell
+.\start.ps1
+```
+
+仅检查环境而不安装或启动：`.\start.ps1 -Check`。
+
+### macOS
+
+首次使用先在终端赋予执行权限，之后可以双击 `start.command`：
+
+```bash
+chmod +x start.command start.sh
+./start.command
+```
+
+也可以始终通过 `bash start.sh` 启动；仅检查环境可运行 `bash start.sh --check`。
+
+### 手动启动
+
+如需完全手动管理环境，在 PowerShell 中运行：
+
+```powershell
+git clone https://github.com/hwg119/novel-continuation.git
 cd novel-continuation
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -16,7 +58,13 @@ npm run build --prefix frontend
 python web_main.py
 ```
 
-打开 <http://127.0.0.1:8765>。服务仅绑定 `127.0.0.1`。修改 Python 后重启 `web_main.py`；修改前端后重新运行 `npm run build --prefix frontend` 并刷新浏览器。开发前端时可运行 `npm run dev --prefix frontend`，Vite 会把 `/api` 请求转发到 Python 服务。
+打开 <http://127.0.0.1:8765>。想先浏览而不调用模型，可在“工程与母本 → 导入已有工程”中选择 `examples/demo-project`；原创演示小说《雾港来信》已经包含 5 章正文、下一章规划、Wiki 事实、人物关系和章节插图。
+
+> 调用续写、规划、审校、Wiki 自动编纂和插图生成需要配置模型。浏览、编辑、全文搜索和查看演示数据不需要模型。
+
+## 开发与手动维护
+
+服务仅绑定 `127.0.0.1`。修改 Python 后重启 `web_main.py`；修改前端后重新运行 `npm run build --prefix frontend` 并刷新浏览器。开发前端时可运行 `npm run dev --prefix frontend`，Vite 会把 `/api` 请求转发到 Python 服务。
 
 已有工程可以直接导入，不需要转换工程文件。
 
@@ -101,4 +149,10 @@ npm run test:routes --prefix frontend
 
 ## 项目参考
 
-本项目早期参考了 AI_NovelGenerator（AGPL-3.0）的模型适配与小说生成思路。此后围绕 Web 工作台、小说 Wiki、历史查证及 Skill 工作流进行了持续重构，当前功能与流程已不宜概括为直接复用其实现。保留这一说明以致谢早期参考来源；历史代码来源及适用许可证不因重构或文档表述调整而改变。
+本项目包含基于 [AI_NovelGenerator](https://github.com/YILING0013/AI_NovelGenerator)（AGPL-3.0）演进的代码。相关版权、来源与许可说明见 [NOTICE](NOTICE)。
+
+## 许可证
+
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)。来源与归属说明见 [NOTICE](NOTICE)，当前审计依据和发布注意事项见 [docs/LICENSE_AUDIT.md](docs/LICENSE_AUDIT.md)。
+
+用户自行导入或创作的小说文本不会仅因使用本软件而自动适用 AGPL；模型供应商条款和所在地法律仍需用户自行确认。

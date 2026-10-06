@@ -1,0 +1,11 @@
+{
+  "chapter": 4,
+  "source_hash": "c61702f5ccab39b7499aabe99b71bce3914c578db1299e0b144690a8930f8f6e",
+  "schema_version": 2,
+  "status": "complete",
+  "facts": [
+    {"subject":"阿芹","predicate":"事故当晚位置","value":"在旧灯塔","quote":"她承认事故当晚自己就在灯塔","kind":"event","target":"","story_time":"二十年前事故当晚","stable_category":"","chapter":4,"offset":254,"source_hash":"c61702f5ccab39b7499aabe99b71bce3914c578db1299e0b144690a8930f8f6e"},
+    {"subject":"阿芹","predicate":"提供线索","value":"向林澈和苏遥交出旧潮汐表","quote":"阿芹来到石阶上，把一张旧潮汐表交给他们。","kind":"relationship","target":"林澈","story_time":"","stable_category":"","chapter":4,"offset":225,"source_hash":"c61702f5ccab39b7499aabe99b71bce3914c578db1299e0b144690a8930f8f6e"},
+    {"subject":"阿芹","predicate":"提供线索","value":"向林澈和苏遥交出旧潮汐表","quote":"阿芹来到石阶上，把一张旧潮汐表交给他们。","kind":"relationship","target":"苏遥","story_time":"","stable_category":"","chapter":4,"offset":225,"source_hash":"c61702f5ccab39b7499aabe99b71bce3914c578db1299e0b144690a8930f8f6e"}
+  ]
+}

@@ -27,3 +27,5 @@ tests/*
 scripts/*
 qa/*
 examples/*
+!examples/demo-project/
+!examples/demo-project/**

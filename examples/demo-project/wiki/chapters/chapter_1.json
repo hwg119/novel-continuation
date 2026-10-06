@@ -1,0 +1,11 @@
+{
+  "chapter": 1,
+  "source_hash": "3611303a5778ca498f764d8ec945657837183a2f890bf8df98e0a6bcb771e48a",
+  "schema_version": 2,
+  "status": "complete",
+  "facts": [
+    {"subject":"林澈","predicate":"收到","value":"盖有二十年前灯塔邮戳的蓝信封","quote":"柜台上放着一只蓝信封。","kind":"event","target":"","story_time":"","stable_category":"","chapter":1,"offset":57,"source_hash":"3611303a5778ca498f764d8ec945657837183a2f890bf8df98e0a6bcb771e48a"},
+    {"subject":"苏遥","predicate":"职业","value":"雾港旧城区邮递员","quote":"她是这条街唯一的邮递员","kind":"state","target":"","story_time":"","stable_category":"","chapter":1,"offset":177,"source_hash":"3611303a5778ca498f764d8ec945657837183a2f890bf8df98e0a6bcb771e48a"},
+    {"subject":"苏遥","predicate":"共同调查","value":"与林澈共同查验蓝信封","quote":"苏遥站在门口","kind":"relationship","target":"林澈","story_time":"","stable_category":"","chapter":1,"offset":132,"source_hash":"3611303a5778ca498f764d8ec945657837183a2f890bf8df98e0a6bcb771e48a"}
+  ]
+}

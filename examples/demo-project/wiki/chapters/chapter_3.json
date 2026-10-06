@@ -1,0 +1,10 @@
+{
+  "chapter": 3,
+  "source_hash": "0428157b8d8cb3562865709183155c383f2cda1d14cc42478d79f0cdcdf09171",
+  "schema_version": 2,
+  "status": "complete",
+  "facts": [
+    {"subject":"苏遥","predicate":"父亲","value":"旧邮袋的原使用者，现已故","quote":"编号属于苏遥已故的父亲","kind":"relationship","target":"苏遥的父亲","story_time":"","stable_category":"","chapter":3,"offset":205,"source_hash":"0428157b8d8cb3562865709183155c383f2cda1d14cc42478d79f0cdcdf09171"},
+    {"subject":"林澈","predicate":"共同进入灯塔","value":"与苏遥进入封闭灯塔查证","quote":"他们打开铁门，沿旋梯上到顶层。","kind":"relationship","target":"苏遥","story_time":"","stable_category":"","chapter":3,"offset":86,"source_hash":"0428157b8d8cb3562865709183155c383f2cda1d14cc42478d79f0cdcdf09171"}
+  ]
+}

@@ -1,0 +1,19 @@
+novel-continuation
+Copyright (C) 2026 novel-continuation contributors
+
+This project is distributed under the GNU Affero General Public License,
+version 3. See LICENSE for the complete license text.
+
+Historical portions of this project were adapted from or inspired by
+AI_NovelGenerator by YILING0013:
+https://github.com/YILING0013/AI_NovelGenerator
+
+AI_NovelGenerator is also distributed under the GNU Affero General Public
+License, version 3. Its copyright notices and license terms continue to apply
+to code derived from that project. Substantial parts of the current Web UI,
+project workflow, Wiki, history research, planning, review and revision
+features were independently developed for novel-continuation.
+
+Third-party Python and JavaScript dependencies retain their own licenses.
+Generated user content and imported manuscripts are not included in this
+repository and are not relicensed by this NOTICE.
