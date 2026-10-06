@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, writeOptions, type Job } from './api'
 import ProjectsPanel from './ProjectsPanel.vue'
 import SettingsPanel from './SettingsPanel.vue'
@@ -9,6 +9,7 @@ import ConfigPanel from './ConfigPanel.vue'
 import WikiPanel from './WikiPanel.vue'
 import RelationGraphPanel from './RelationGraphPanel.vue'
 import HomePanel from './HomePanel.vue'
+const ChatPanel = defineAsyncComponent(() => import('./ChatPanel.vue'))
 import RevisionPanel from './RevisionPanel.vue'
 import TaskDrawer from './TaskDrawer.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
@@ -25,7 +26,7 @@ type ChapterSummary = { number: number; text: string; exists: boolean; valid: bo
 type ChapterIllustration = { exists: boolean; svg: string; png?: string }
 type ChapterSearchResult = { chapter: number; segment: number; text: string; relevance: number;
   semantic_score: number | null; matched_terms: string[]; constraint_mode: string }
-type Tab = 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config'
+type Tab = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config'
 type GenerationRequest = { number: number; title: string; beatsLimit: number | null }
 type PendingGeneration = { request: GenerationRequest; overwrite: boolean; modelName: string }
 type NavItem = { id: Tab; label: string; icon: string }
@@ -510,12 +511,19 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('resize', resizeManuscript) })
 </script>
 
-<template><div class="shell" :class="{ 'book-mode': bookMode }"><aside class="sidebar">
+<template><div class="shell" :class="{ 'book-mode': bookMode, 'chat-mode': activeTab === 'chat' }"><aside class="sidebar">
   <div class="brand"><span class="brand-mark">续</span><div><strong>续写工作台</strong><small>长篇小说 · 本机工程</small></div></div>
   <div class="project-switcher"><label for="project">当前工程</label><span>{{ chapters.length }} 章<span v-if="wikiPendingCount"> · Wiki 待更新 {{ wikiPendingCount }}</span></span>
     <select id="project" :value="projectId" @change="switchProject">
       <option v-if="!projects.length" value="">暂无工程</option><option v-for="item in projects" :key="item.id" :value="item.id">{{ item.name }}</option></select></div>
-  <nav class="primary-nav" aria-label="功能">
+  <div class="workspace-entry"><span class="workspace-entry-label">创作入口</span>
+    <button class="conversation-entry" :class="{ active: activeTab === 'chat' }" :aria-current="activeTab === 'chat' ? 'page' : undefined" @click="switchTab('chat')">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H9l-5 4V4ZM8 8h8M8 12h5" /></svg>
+      <span><strong>对话创作</strong><small>说出目标，一起推进</small></span><span aria-hidden="true">↗</span>
+    </button>
+  </div>
+  <div class="workbench-divider"><span>功能工作台</span><small>查看 · 管理 · 编辑</small></div>
+  <nav class="primary-nav" aria-label="功能工作台">
     <section v-for="group in navGroups" :key="group.label" class="nav-group"><span class="nav-group-label">{{ group.label }}</span>
       <button v-for="item in group.items" :key="item.id" :class="{ active: activeTab === item.id }" @click="switchTab(item.id)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="item.icon" /></svg><span>{{ item.label }}</span>
@@ -534,6 +542,8 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <HomePanel v-if="activeTab === 'home'" :project-id="projectId" :project-name="project?.name || ''"
     :chapters="chapters" :model-name="modelName" :wiki-pending-count="wikiPendingCount" :generating="generating"
     @generate="generate" @settings="openSettings" @chapter="openChapter" @navigate="switchTab" />
+  <ChatPanel v-else-if="activeTab === 'chat'" :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName"
+    @task="taskStarted" />
   <template v-else-if="activeTab === 'write'"><div class="reading-layout">
     <aside class="reading-index" :class="{ open: bookIndexOpen }" aria-label="本书章节目录"><div class="reading-index-head"><strong>章节目录</strong><span>{{ chapters.length }} 章</span><button v-if="bookMode" type="button" aria-label="关闭章节目录" @click="bookIndexOpen = false">×</button></div>
       <div v-if="!bookMode && chapters.length" class="chapter-export-tools"><button type="button" @click="toggleAllExportChapters">{{ selectedExportChapters.length === chapters.length ? '清空' : '全选' }}</button><span>已选 {{ selectedExportChapters.length }} 章</span><button type="button" class="chapter-export-submit" :disabled="!selectedExportChapters.length || exportingChapters" @click="exportSelectedChapters">{{ exportingChapters ? '生成中…' : '合并导出' }}</button></div>
@@ -599,7 +609,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <RelationGraphPanel v-else-if="activeTab === 'relationships'" :project-id="projectId" :current-chapter="chapterNumber" @back="activeTab = 'wiki'" @open-chapter="openWikiChapter" @open-subject="wikiFocusSubject = $event; activeTab = 'wiki'" />
   <RunsPanel v-else-if="activeTab === 'runs'" :project-id="projectId" :focus-job="focusJob" />
   <ConfigPanel v-else :key="activeTab" @changed="loadConfig" />
-  <TaskDrawer v-if="!bookMode" :project-id="projectId" :focus-job="focusJob" @view="activeTab = 'runs'" @layout="consoleLayout = $event" />
+  <TaskDrawer v-if="!bookMode && activeTab !== 'chat'" :project-id="projectId" :focus-job="focusJob" @view="activeTab = 'runs'" @layout="consoleLayout = $event" />
   <ConfirmDialog dialog-id="generation-confirm" :open="Boolean(pendingGeneration)"
     :symbol="pendingGeneration?.overwrite ? '覆' : '写'"
     :title="pendingGeneration?.overwrite ? '确认覆盖并续写？' : '确认开始续写？'"

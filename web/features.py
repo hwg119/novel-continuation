@@ -65,6 +65,7 @@ class GenerateRequest(BaseModel):
     title: str = ""
     beats_limit: int | None = None
     overwrite: bool = False
+    requirements: str = ""
 
 
 class ChapterRequest(BaseModel):
@@ -413,6 +414,9 @@ def register_features(app: FastAPI, workspace_root: str,
         settings.update({key: value for key, value in payload.preview.items()
                          if key in ("background", "extra_requirements", "chapter_brief",
                                     "chapter_requirements", "beats_per_chapter")})
+        if payload.requirements.strip():
+            settings['chapter_requirements'] = (str(settings.get('chapter_requirements') or '')
+                                                + '\n' + payload.requirements.strip()).strip()
         previous = _planning_context(path, project_settings, payload.number)
         from core.auto_wiki import wiki_context
         wiki = wiki_context(path, previous, before_chapter=payload.number)
@@ -688,6 +692,9 @@ def register_features(app: FastAPI, workspace_root: str,
         path = project_path(project_id)
         settings = settings_for_chapter(load_project_settings(path), payload.number)
         beats = settings.get("beats") or []
+        if payload.requirements.strip():
+            settings['chapter_requirements'] = (str(settings.get('chapter_requirements') or '')
+                                                + '\n' + payload.requirements.strip()).strip()
         if payload.beats_limit:
             beats = beats[:payload.beats_limit]
         if not beats:
@@ -1349,3 +1356,17 @@ def register_features(app: FastAPI, workspace_root: str,
             return {"id": job_id, "entries": read_wiki_run_log(path, job_id)}
         except (FileNotFoundError, ValueError):
             raise HTTPException(404, "此任务没有完整日志") from None
+
+    from web.chat import register_chat
+    def chat_request(data):
+        return ChapterRequest(number=data['chapter'], model_name=data['model_name'],
+                              requirements=data.get('requirements', ''))
+    register_chat(app, workspace_root, project_path, llm, {
+        'plan': lambda project, data: suggest_plan(project, chat_request(data)),
+        'plan_revision': lambda project, data: revise_plan(project, chat_request(data)),
+        'generate': lambda project, data: generate(project, GenerateRequest(
+            number=data['chapter'], model_name=data['model_name'], overwrite=False,
+            requirements=data.get('requirements', ''))),
+        'consistency': lambda project, data: consistency(project, chat_request(data)),
+        'revise': lambda project, data: revise(project, chat_request(data)),
+    }, jobs, _write_required)

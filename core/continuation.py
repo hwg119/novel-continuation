@@ -36,16 +36,18 @@ class ContinuationLLM:
 
     def complete(self, prompt: str, system: str = "",
                  temperature: float = None, num_predict: int = None,
-                 disable_thinking: bool = False, thinking_effort: str = None) -> str:
+                 disable_thinking: bool = False, thinking_effort: str = None,
+                 on_chunk=None) -> str:
         temperature = (self.cfg.get("temperature", 0.8)
                        if temperature is None else temperature)
         self.last_response_diagnostics = {"model_name": self.cfg.get("model_name"),
                                           "interface_format": self.cfg.get("interface_format"),
                                           "requested_max_tokens": int(num_predict or self.cfg.get("max_tokens", 4096))}
         if self.is_ollama:
-            return self._ollama_chat(prompt, system, temperature, num_predict)
+            return self._ollama_chat(prompt, system, temperature, num_predict, on_chunk)
         return self._adapter_invoke(prompt, system, temperature, num_predict,
-                                    disable_thinking=disable_thinking, thinking_effort=thinking_effort)
+                                    disable_thinking=disable_thinking, thinking_effort=thinking_effort,
+                                    on_chunk=on_chunk)
 
     # -- 原生 Ollama --------------------------------------------------
 
@@ -56,14 +58,14 @@ class ContinuationLLM:
                 url = url[: -len(suffix)]
         return url
 
-    def _ollama_chat(self, prompt, system, temperature, num_predict) -> str:
+    def _ollama_chat(self, prompt, system, temperature, num_predict, on_chunk=None) -> str:
         payload = {
             "model": self.cfg.get("model_name", ""),
             "messages": [
                 {"role": "system", "content": system or ""},
                 {"role": "user", "content": prompt},
             ],
-            "stream": False,
+            "stream": on_chunk is not None,
             "think": False,
             "options": {
                 "temperature": temperature,
@@ -81,6 +83,16 @@ class ContinuationLLM:
         )
         timeout = int(self.cfg.get("timeout", 2400) or 2400)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if on_chunk is not None:
+                parts = []
+                for line in resp:
+                    data = json.loads(line)
+                    if data.get('error'): raise ValueError(data['error'])
+                    content = (data.get('message') or {}).get('content') or ''
+                    if content:
+                        parts.append(content)
+                        on_chunk(content)
+                return ''.join(parts)
             data = json.loads(resp.read().decode("utf-8"))
         self.last_response_diagnostics.update({key: data.get(key) for key in
             ("done_reason", "prompt_eval_count", "eval_count", "total_duration")})
@@ -89,7 +101,7 @@ class ContinuationLLM:
     # -- 通用适配器 ----------------------------------------------------
 
     def _adapter_invoke(self, prompt, system, temperature, num_predict,
-                        disable_thinking=False, thinking_effort=None) -> str:
+                        disable_thinking=False, thinking_effort=None, on_chunk=None) -> str:
         from llm_adapters import create_llm_adapter
         model_name = str(self.cfg.get("model_name", "")).lower()
         extra_body = None
@@ -122,7 +134,21 @@ class ContinuationLLM:
             extra_body=extra_body,
         )
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
+        client = getattr(adapter, '_client', None)
+        if on_chunk is not None and callable(getattr(client, 'stream', None)):
+            parts = []
+            for chunk in client.stream(full_prompt):
+                content = chunk.content
+                if isinstance(content, list):
+                    content = ''.join(item.get('text', '') for item in content
+                                      if isinstance(item, dict) and item.get('type') == 'text')
+                if content:
+                    parts.append(content)
+                    on_chunk(content)
+            return ''.join(parts)
         result = adapter.invoke(full_prompt) or ""
+        if on_chunk is not None and result:
+            on_chunk(result)  # Non-streaming providers return one complete response.
         self.last_response_diagnostics.update(getattr(adapter, "last_response_diagnostics", {}))
         self.last_response_diagnostics["requested_thinking_parameters"] = extra_body
         return result
@@ -166,10 +192,11 @@ def read_style_sample(project_dir: str, settings: dict) -> str:
 
 
 def clean_text(text: str, settings: dict = None) -> str:
-    """去掉思维链/markdown/拉丁噪声，按需转繁体。"""
+    """去掉思维链和 Markdown 外壳，保留正文中的字母、名称与代号。"""
     settings = settings or {}
     text = re.sub(r"<think(?:ing)?>.*?(?:</think(?:ing)?>|$)", "",
                   text or "", flags=re.DOTALL)
+    text = re.sub(r"(?m)^[ \t]*```[A-Za-z0-9_-]*[ \t]*(?:\r?\n|$)", "", text)
     text = text.replace("```", "").strip()
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -177,9 +204,10 @@ def clean_text(text: str, settings: dict = None) -> str:
         lines = lines[1:]
     text = "\n".join(lines)
 
-    text = re.sub(r"[*#_`~]+", "", text)
-    text = re.sub(r"[（(]\s*[A-Za-z]+\s*[）)]", "", text)
-    text = re.sub(r"\s*[A-Za-z][A-Za-z0-9'’\-\s]*", "", text)
+    # 字母可能是姓名首字母、线索代号或正文语言，不能按字符集删除。
+    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)
+    text = text.replace("**", "").replace("__", "").replace("~~", "").replace("`", "")
+    text = re.sub(r"(?<!\w)[*_]([^*_\n]+)[*_](?!\w)", r"\1", text)
 
     if settings.get("traditional"):
         try:

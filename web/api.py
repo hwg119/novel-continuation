@@ -129,9 +129,11 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
     def plan_status(project_id: str, number: int):
         if number < 1:
             raise HTTPException(400, "章号必须大于零")
-        settings = settings_for_chapter(load_project_settings(project_path(project_id)), number)
+        project = project_path(project_id)
+        settings = settings_for_chapter(load_project_settings(project), number)
         beats = settings.get("beats") or []
-        return {"number": number, "has_beats": bool(beats), "beats_count": len(beats),
+        return {"number": number, "chapter_exists": Path(chapter_path(project, number)).is_file(),
+                "has_beats": bool(beats), "beats_count": len(beats),
                 "title": settings.get("chapter_title") or ""}
 
     @app.get("/api/projects/{project_id}/chapters/{number}/revisions")
