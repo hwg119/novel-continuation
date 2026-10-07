@@ -33,6 +33,7 @@ export function writeOptions(method: string, data?: unknown): RequestInit {
 }
 
 export type Job = { id: string; kind: string; status: string; message: string;
+  stage?: string; elapsed_seconds?: number; can_cancel?: boolean; cancel_requested?: boolean; can_resume?: boolean;
   created_at?: string;
   events: { time: string; message: string; level?: 'info' | 'success' | 'error'; data: Record<string, unknown> }[];
   result: Record<string, unknown> | null }

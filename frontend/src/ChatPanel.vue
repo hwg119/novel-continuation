@@ -13,6 +13,8 @@ import { chatTimeline, chatReplyText, type ChatEvent, type ProcessEntry } from '
 import { resultCard, resultLink } from './chatResults'
 import { beatPreview } from './beatPreview'
 import { importStoryRequirements } from './storyReview'
+import RevisionApplyDialog from './RevisionApplyDialog.vue'
+import ChatIllustrationPreview from './ChatIllustrationPreview.vue'
 
 const props = defineProps<{ projectId: string; chapterNumber: number | null; modelName: string }>()
 const emit = defineEmits<{ task: [id: string] }>()
@@ -49,7 +51,19 @@ const confirming = ref('')
 const saving = ref('')
 const connected = ref(false)
 const expandedProcesses = ref<Record<string, boolean>>({})
-const processStates: Record<string, string> = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止', interrupted: '已中断' }
+const processStates: Record<string, string> = { running: '进行中', cancelling: '正在取消', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' }
+const taskControl = ref('')
+function taskDuration(value?: number) { return value == null ? '' : value < 60 ? `${value} 秒` : `${Math.floor(value / 60)} 分 ${value % 60} 秒` }
+async function controlTask(action: string, operation: 'cancel' | 'resume') {
+  if (taskControl.value) return
+  taskControl.value = action
+  try {
+    const result = await api<{ id?: string }>(`/api/projects/${props.projectId}/chat/${selected.value}/actions/${action}/${operation}`,writeOptions('POST'))
+    if (result.id) emit('task',result.id)
+    if (operation === 'cancel') toast.info('取消已请求，等待当前调用返回后在安全节点停止')
+  } catch (error) { toast.error(error) }
+  finally { taskControl.value = '' }
+}
 function toggleProcess(key: string, event: globalThis.Event) {
   expandedProcesses.value[key] = (event.target as HTMLDetailsElement).open
 }
@@ -78,7 +92,7 @@ function scrollToLatest() {
 }
 let stream: EventSource | null = null
 let loadVersion = 0
-const labels: Record<string, string> = { plan: '生成分幕', plan_revision: '修改分幕', generate: '续写章节', consistency: '故事审校', revise: '执行修订' }
+const labels: Record<string, string> = { plan: '生成分幕', plan_revision: '修改分幕', generate: '续写章节', consistency: '故事审校', revise: '执行修订', illustration:'生成章节插图' }
 const running = computed(() => {
   const user = [...events.value].reverse().find(e => e.kind === 'user')
   if (!user) return ''
@@ -86,6 +100,22 @@ const running = computed(() => {
     ? '' : user.data.turn_id as string
 })
 const messages = computed(() => chatTimeline(events.value))
+const applyingRevision = ref<Event | null>(null)
+function revisionApplied(job: string) { return events.value.some(row => row.kind === 'revision_applied' && row.data.job_id === job) }
+function resultState(data: Record<string, any>) {
+  return revisionApplied(data.job_id) ? '已应用并保存' : resultCard(data,planSaved(data.action_id)).state
+}
+function resultActionClick(click: MouseEvent, event: Event, label: string) {
+  if (label !== '比较并应用') return
+  click.preventDefault()
+  applyingRevision.value = event
+}
+function revisionSaved(result: { vector_job_id?: string | null }) {
+  applyingRevision.value = null
+  if (result.vector_job_id) emit('task',result.vector_job_id)
+  toast.success('修订稿已应用并保存正文，原稿已备份')
+  void loadChapterState().catch(toast.error)
+}
 const enhancementChoices = ref<Record<string, string[]>>({})
 const revisingAudit = ref('')
 function auditCanRevise(data: Record<string, any>) {
@@ -263,17 +293,21 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
           <details v-if="event.kind === 'process'" class="chat-process" :class="event.data.status" :open="!!expandedProcesses[event.data.key]" @toggle="toggleProcess(event.data.key, $event)">
             <summary><span class="chat-process-title">&gt;_ 处理过程 · {{ event.data.label }}</span><small>{{ processStates[event.data.status] || event.data.status }} · {{ event.data.entries.length }} 条</small><span class="chat-process-latest">{{ event.data.entries.at(-1)?.text || '等待第一条日志' }}</span></summary>
             <div class="chat-process-log" role="log" aria-label="处理日志"><div v-for="entry in event.data.entries" :key="entry.id" class="chat-process-line" :class="entry.level"><time>{{ entry.time || '—' }}</time><span>{{ entry.level === 'error' ? 'ERR' : entry.level === 'success' ? 'OK' : 'INFO' }}</span><div>{{ entry.text }}<small v-if="Object.keys(entry.details).length">{{ logDetails(entry) }}</small></div></div><p v-if="!event.data.entries.length">任务已开始，等待进度日志。</p></div>
+            <div v-if="event.data.action_id" class="chat-task-controls"><span>{{ processStates[event.data.status] }} · 已用 {{ taskDuration(event.data.elapsed_seconds) || '—' }}</span><button v-if="event.data.can_cancel" type="button" class="chat-button chat-button-secondary" :disabled="event.data.cancel_requested || !!taskControl" @click="controlTask(event.data.action_id, 'cancel')">{{ event.data.cancel_requested ? '等待安全停止…' : '取消后台任务' }}</button><small v-if="event.data.cancel_requested && event.data.status === 'cancelling'">不会强行终止正在进行的模型请求。</small></div>
           </details>
           <template v-else-if="event.kind === 'action'"><div class="chat-result-head"><div><small>第 {{ event.data.chapter }} 章 · {{ event.data.model }}</small><h3>{{ labels[event.data.tool] }}</h3></div><span class="chat-result-state">{{ actionHandled(event.data.action_id) ? '操作已处理，结果见下方' : '待执行' }}</span></div><p class="chat-action-description">{{ event.data.message }}</p><details v-if="event.data.requirements" class="chat-content-preview"><summary>查看本次处理要求</summary><div class="chat-result-prose">{{ event.data.requirements }}</div></details><div class="chat-result-actions"><button type="button" class="chat-button" :disabled="actionHandled(event.data.action_id) || !!confirming" @click="confirm(event)">{{ actionHandled(event.data.action_id) ? '已处理' : confirming === event.data.action_id ? '启动中…' : '执行' }}</button></div></template>
-          <template v-else-if="event.kind === 'task_result'"><div class="chat-result-head"><div><small>第 {{ event.data.chapter }} 章<span v-if="event.data.model"> · {{ event.data.model }}</span></small><h3>{{ resultCard(event.data).title }}</h3></div><span class="chat-result-state">{{ resultCard(event.data, planSaved(event.data.action_id)).state }}</span></div><p>{{ event.data.text }}</p>
+          <template v-else-if="event.kind === 'task_result'"><div class="chat-result-head"><div><small>第 {{ event.data.chapter }} 章<span v-if="event.data.model"> · {{ event.data.model }}</span></small><h3>{{ resultCard(event.data).title }}</h3></div><span class="chat-result-state">{{ resultState(event.data) }}</span></div><p>{{ event.data.text }}</p>
             <p v-if="event.data.result?.story_summary" class="chat-result-summary">{{ event.data.result.story_summary }}</p>
+            <ChatIllustrationPreview v-if="event.data.tool === 'illustration' && event.data.status === 'completed'" :project-id="projectId" :chapter="event.data.chapter" />
+            <p v-if="event.data.elapsed_seconds != null" class="chat-preview-note">已用 {{ taskDuration(event.data.elapsed_seconds) }}</p>
+            <button v-if="event.data.can_resume" type="button" class="chat-button" :disabled="!!taskControl" @click="controlTask(event.data.action_id, 'resume')">{{ taskControl === event.data.action_id ? '正在恢复…' : '从检查点继续任务' }}</button>
             <details v-if="event.data.result?.issues?.length" class="chat-result-warning"><summary>修订验收提醒 · {{ event.data.result.issues.length }} 项</summary><ul><li v-for="(issue, index) in event.data.result.issues" :key="index">{{ issue }}</li></ul></details>
             <details v-if="event.data.result?.beats?.length" class="chat-plan-preview"><summary>查看分幕 · {{ event.data.result.chapter_title }}<span>{{ event.data.result.beats.length }} 幕</span></summary><div class="chat-beat-list"><section v-for="beat in event.data.result.beats.map(beatPreview)" :key="beat.key" class="chat-beat-card"><header><span class="chat-beat-number">{{ String(beat.number).padStart(2, '0') }}</span><h4>{{ beat.name }}</h4></header><div v-if="beat.meta.length" class="chat-beat-meta"><span v-for="meta in beat.meta" :key="meta.label"><small>{{ meta.label }}</small>{{ meta.value }}</span></div><div class="chat-beat-body"><p v-for="(paragraph, index) in beat.paragraphs" :key="index">{{ paragraph }}</p></div></section></div><p v-if="event.data.result.planning_review?.summary" class="chat-plan-review">{{ event.data.result.planning_review.summary }}</p></details>
             <section v-if="event.data.result?.revision_requirements" class="chat-review-requirements"><h4>主线修订要求</h4><div class="chat-result-prose">{{ event.data.result.revision_requirements }}</div></section>
             <details v-if="event.data.result?.story_enhancements?.length" class="chat-content-preview"><summary>可选情节增强 · {{ event.data.result.story_enhancements.length }} 项 · 已选 {{ enhancementChoices[event.data.job_id]?.length || 0 }} 项</summary><div class="chat-enhancement-list"><section v-for="(item, index) in event.data.result.story_enhancements" :key="item.id || index" :class="{ selected: enhancementChoices[event.data.job_id]?.includes(item.id) }"><label class="chat-enhancement-choice"><input v-model="enhancementChoices[event.data.job_id]" type="checkbox" :value="item.id" :disabled="!item.id || event.data.status !== 'completed'"><strong>{{ item.scope || `建议 ${Number(index) + 1}` }}</strong></label><p>{{ item.suggestion }}</p><small v-if="item.preserve">保留：{{ item.preserve }}</small></section></div><p class="chat-preview-note">使用当前模型直接修订主线要求与所选增强，不跳转页面，不自动覆盖正文。</p></details>
             <details v-if="event.data.result?.report" class="chat-content-preview"><summary>查看完整审校报告</summary><div class="chat-result-prose">{{ event.data.result.report }}</div></details>
             <details v-if="event.data.result?.candidate" class="chat-content-preview"><summary>预览修订正文 · {{ event.data.result.candidate.length }} 字符</summary><div class="chat-result-prose chat-draft-prose">{{ event.data.result.candidate }}</div><p class="chat-preview-note">这是候选稿，不代表已应用；请比较差异后决定。</p></details>
-            <div class="chat-result-actions"><button v-if="event.data.status === 'completed' && event.data.result?.beats?.length" type="button" class="chat-button" :disabled="planSaved(event.data.action_id) || saving === event.data.action_id" @click="savePlan(event)">{{ planSaved(event.data.action_id) ? '已保存分幕' : saving === event.data.action_id ? '保存中…' : '保存分幕' }}</button><button v-if="resultCard(event.data).tool === 'consistency'" type="button" class="chat-button" :disabled="!auditCanRevise(event.data) || !!revisingAudit" :title="`使用当前模型：${modelName}`" @click="reviseAudit(event)">{{ revisingAudit === event.data.job_id ? '正在启动修订…' : '导入要求并修订' }}</button><a v-for="action in resultCard(event.data, planSaved(event.data.action_id), enhancementChoices[event.data.job_id] || []).actions.filter(action => action.label !== '导入要求并修订')" :key="action.label" class="chat-feature-link" :href="resultLink(projectId, event.data.chapter, action)">{{ action.label }} →</a></div></template>
+            <div class="chat-result-actions"><button v-if="event.data.status === 'completed' && event.data.result?.beats?.length" type="button" class="chat-button" :disabled="planSaved(event.data.action_id) || saving === event.data.action_id" @click="savePlan(event)">{{ planSaved(event.data.action_id) ? '已保存分幕' : saving === event.data.action_id ? '保存中…' : '保存分幕' }}</button><button v-if="resultCard(event.data).tool === 'consistency'" type="button" class="chat-button" :disabled="!auditCanRevise(event.data) || !!revisingAudit" :title="`使用当前模型：${modelName}`" @click="reviseAudit(event)">{{ revisingAudit === event.data.job_id ? '正在启动修订…' : '导入要求并修订' }}</button><a v-for="action in resultCard(event.data, planSaved(event.data.action_id), enhancementChoices[event.data.job_id] || []).actions.filter(action => action.label !== '导入要求并修订')" :key="action.label" class="chat-feature-link" :href="resultLink(projectId, event.data.chapter, action)" @click="resultActionClick($event, event, action.label)">{{ action.label }} →</a></div></template>
           <template v-else-if="event.kind === 'link'"><a class="chat-feature-link" :href="link(event.data)">{{ event.data.label }} →</a></template>
           <template v-else><p>{{ event.kind === 'user' ? (event.data.text || event.data.message) : chatReplyText(event.data.text || event.data.message || '') }}</p></template>
         </article>
@@ -293,6 +327,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
         </XSender>
       </div>
     </div>
+    <RevisionApplyDialog v-if="applyingRevision" :project-id="projectId" :session-id="selected" :action-id="applyingRevision.data.action_id" :job-id="applyingRevision.data.job_id" @close="applyingRevision = null" @saved="revisionSaved" />
   </section>
 </template>
 
@@ -315,6 +350,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-empty{padding:32px 20px;border-left:3px solid #79a998;color:#688486}
 .chat-entry{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px 0;margin:8px 0;line-height:1.8}.chat-entry p{margin:0}
 .chat-entry.user{width:fit-content;max-width:80%;background:#e5efec;padding:10px 16px;margin-left:auto;margin-right:0;border-radius:12px 12px 0 12px;text-align:left}
+.chat-task-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 14px;font-size:12px;color:#527064}.chat-task-controls small{width:100%}
 .chat-enhancement-choice{display:flex;align-items:flex-start;gap:9px;cursor:pointer;color:#183f3a;font-size:14px}.chat-enhancement-choice input{width:16px;height:16px;flex:none;margin:4px 0 0;accent-color:#326b59}.chat-enhancement-list>section.selected{border-color:#92b6a6;background:#edf4ef}
 .chat-entry.action,.chat-entry.task_result{white-space:normal;background:#fbfdfb}.chat-action-description{font-size:14px;line-height:1.8;color:#587069}.chat-content-preview{padding:10px 12px;border:1px solid #d4e1dd;border-radius:6px;background:#f7faf8}.chat-content-preview>summary{font-size:14px;font-weight:600}.chat-result-prose{max-width:85ch;margin-top:12px;white-space:pre-wrap;font-size:14px;line-height:1.85;color:#40565b;overflow-wrap:anywhere}.chat-draft-prose{font-family:"Noto Serif CJK SC","Songti SC",serif;line-height:1.95}.chat-review-requirements{margin-top:14px;padding:12px 14px;border-left:3px solid #92b6a6;background:#edf4ef}.chat-review-requirements h4,.chat-enhancement-list h4{margin:0;color:#183f3a;font-size:14px}.chat-review-requirements .chat-result-prose{margin-top:8px}.chat-enhancement-list{display:grid;gap:10px;margin-top:12px}.chat-enhancement-list>section{padding:12px;border:1px solid #d4e1dd;border-radius:6px;background:#fbfdfb}.chat-entry .chat-enhancement-list p{margin-top:6px;font-size:14px;line-height:1.85;white-space:pre-wrap}.chat-enhancement-list small{display:block;margin-top:8px;color:#698585;font-size:12px}.chat-entry .chat-preview-note{margin-top:12px;color:#698585;font-size:12px}.chat-result-warning ul{padding-left:20px;margin:10px 0 0}.chat-result-warning li{margin-bottom:8px;white-space:pre-wrap;line-height:1.75}.chat-result-actions>.chat-button{margin-top:0!important}
 .chat-plan-preview{white-space:normal}.chat-plan-preview>summary{padding:10px 0;font-size:14px}.chat-plan-preview>summary>span{margin-left:12px;color:#698585;font-size:12px}.chat-beat-list{display:grid;gap:12px;margin-top:8px}.chat-beat-card{padding:18px 20px;border:1px solid #d4e1dd;border-radius:8px;background:#fbfdfb}.chat-beat-card>header{display:flex;align-items:center;gap:12px;margin-bottom:12px}.chat-beat-number{display:grid;place-items:center;width:32px;height:32px;flex:none;border-radius:6px;background:#e5efec;color:#356b59;font:600 13px/1 Consolas,monospace}.chat-beat-card h4{margin:0;color:#183f3a;font-size:17px;line-height:1.4}.chat-beat-meta{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}.chat-beat-meta>span{display:inline-flex;gap:7px;align-items:baseline;padding:4px 9px;border-radius:5px;background:#edf4ef;color:#42685c;font-size:12px}.chat-beat-meta small{color:#789084;font-size:11px}.chat-beat-body{max-width:85ch;color:#40565b;font-size:14px;line-height:1.85;overflow-wrap:anywhere}.chat-entry .chat-beat-body p{margin:0 0 8px;white-space:pre-wrap}.chat-entry .chat-beat-body p:last-child{margin-bottom:0}.chat-entry .chat-plan-review{margin-top:12px;padding:10px 12px;border-left:3px solid #92b6a6;background:#edf4ef;color:#587069;font-size:13px;line-height:1.75}@media(max-width:800px){.chat-beat-card{padding:14px}.chat-beat-body{font-size:14px}}

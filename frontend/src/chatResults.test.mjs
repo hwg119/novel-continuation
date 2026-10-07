@@ -9,6 +9,10 @@ test('result cards separate requirements, enhancements, draft and review preview
   assert.match(component,/预览修订正文/)
   assert.match(component,/主线修订要求/)
   assert.match(component,/修订验收提醒/)
+  assert.match(component,/RevisionApplyDialog v-if="applyingRevision"/)
+  const dialog = readFileSync(new URL('./RevisionApplyDialog.vue',import.meta.url),'utf8')
+  assert.match(dialog,/应用并保存正文/)
+  assert.match(dialog,/apply-revision/)
   assert.doesNotMatch(component,/event.data.result.report \|\| event.data.result.candidate/)
 })
 
@@ -37,6 +41,14 @@ test('failed tasks offer logs but no save or application actions', () => {
   const card = resultCard({ tool:'revise',status:'failed',job_id:'j1' })
   assert.deepEqual(card.actions.map(a=>a.view),['runs'])
   assert.equal(card.completed,false)
+})
+
+test('illustration completion offers preview settings and chapter reading', () => {
+  const card = resultCard({tool:'illustration',status:'completed',job_id:'i1'})
+  assert.equal(card.title,'章节插图')
+  assert.equal(card.state,'插图已保存')
+  assert.ok(card.actions.some(a=>a.view==='settings'))
+  assert.ok(card.actions.some(a=>a.view==='write'))
 })
 
 test('only selected valid enhancements are passed to the matching audit', () => {

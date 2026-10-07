@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, type Job } from './api'
+import { api, writeOptions, type Job } from './api'
 import { taskEventLevel as eventLevel } from './taskEventLevel'
 
 const props = defineProps<{ projectId: string; focusJob: string }>()
@@ -13,6 +13,14 @@ const expanded = ref(false)
 const dismissed = ref('')
 const closedJob = ref<Job | null>(null)
 const error = ref('')
+const cancelling = ref(false)
+async function cancelTask() {
+  if (!job.value || cancelling.value) return
+  cancelling.value = true
+  try { await api(`/api/projects/${props.projectId}/jobs/${job.value.id}/cancel`,writeOptions('POST')); await refresh() }
+  catch (cause) { error.value = String(cause) }
+  finally { cancelling.value = false }
+}
 const logBox = ref<HTMLElement | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
 let loading = false
@@ -98,8 +106,10 @@ onUnmounted(() => { if (timer) clearInterval(timer); emit('layout', { visible: f
 
 <template><aside v-if="job" class="task-drawer" :class="{ expanded }" aria-label="任务实时日志">
   <div class="task-drawer-bar"><span class="terminal-mark" aria-hidden="true">&gt;_</span>
-    <span class="terminal-title">任务控制台</span><span class="task-state" :class="job.status">{{ job.status === 'running' ? '运行中' : job.status === 'completed' ? '已完成' : job.status === 'failed' ? '失败' : '已中断' }}</span>
+    <span class="terminal-title">任务控制台</span><span class="task-state" :class="job.status">{{ job.status === 'running' ? job.cancel_requested ? '正在取消' : '运行中' : job.status === 'completed' ? '已完成' : job.status === 'failed' ? '失败' : job.status === 'cancelled' ? '已取消' : '已中断' }}</span>
     <strong>{{ stage(job.message) }}</strong><span class="task-count">{{ job.events.length }} 行</span>
+    <span v-if="job.elapsed_seconds != null" class="task-count">已用 {{ job.elapsed_seconds }} 秒</span>
+    <button v-if="job.can_cancel" type="button" class="task-icon" :disabled="cancelling || job.cancel_requested" @click="cancelTask">{{ job.cancel_requested ? '等待安全停止' : '取消任务' }}</button>
     <button type="button" class="task-icon" :aria-label="expanded ? '收起日志' : '展开日志'" :aria-expanded="expanded" @click="expanded = !expanded">{{ expanded ? '收起' : '展开' }} <span aria-hidden="true">{{ expanded ? '⌄' : '⌃' }}</span></button>
     <button type="button" class="task-icon task-close" aria-label="关闭任务抽屉" @click="close">×</button></div>
   <div v-if="expanded" ref="logBox" class="task-drawer-log" role="log" aria-live="polite" aria-relevant="additions">

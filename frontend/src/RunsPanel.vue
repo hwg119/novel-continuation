@@ -17,6 +17,14 @@ const wikiOpened = ref(false)
 const planOpened = ref(false)
 const error = ref('')
 const resuming = ref(false)
+const cancelling = ref(false)
+async function cancelTask() {
+  if (!selectedJob.value || cancelling.value) return
+  cancelling.value = true
+  try { await api(`/api/projects/${props.projectId}/jobs/${selectedJob.value.id}/cancel`,writeOptions('POST')); await refresh() }
+  catch (cause) { error.value = String(cause) }
+  finally { cancelling.value = false }
+}
 const savedPlanJob = ref('')
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -167,9 +175,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <div class="run-detail-head"><span class="eyebrow">{{ selected.type === 'job' ? '后台任务' : '续写日志' }}</span>
         <h2>{{ selected.title }}</h2><time>{{ displayTime(selected.created_at) }}</time></div>
       <template v-if="selected.type === 'job'"><p class="run-summary">{{ selectedJob?.message }}</p>
+        <p v-if="selectedJob?.elapsed_seconds != null">已用 {{ selectedJob.elapsed_seconds }} 秒 · {{ selectedJob.cancel_requested && selectedJob.status === 'running' ? '正在等待安全停止' : selectedJob.stage || selectedJob.message }}</p>
+        <button v-if="selectedJob?.can_cancel" :disabled="cancelling || selectedJob.cancel_requested" @click="cancelTask">{{ selectedJob.cancel_requested ? '等待安全停止…' : '取消任务' }}</button>
         <div v-if="selectedJob?.kind === 'wiki'" class="wiki-log-access"><div><strong>完整编纂日志</strong><p>逐片段保存提示词、模型原始回复、解析结果及耗时；可能含小说正文，只在本机查看。</p></div><button :disabled="wikiLoading" @click="loadWikiDetails">{{ wikiLoading ? '读取中…' : wikiOpened ? '刷新完整日志' : '查看完整日志' }}</button></div>
         <div v-if="selectedJob && ['plan', 'consistency', 'revise'].includes(selectedJob.kind)" class="wiki-log-access"><div><strong>{{ selectedJob.kind === 'consistency' ? '完整审校日志' : selectedJob.kind === 'revise' ? '完整修订日志' : '完整规划日志' }}</strong><p>保存各阶段的提示词、模型原始回复及检查结果；可能含小说正文，只在本机查看。</p></div><button :disabled="wikiLoading" @click="loadPlanDetails">{{ wikiLoading ? '读取中…' : planOpened ? '刷新完整日志' : '查看完整日志' }}</button></div>
-        <button v-if="selectedJob && ['revise', 'plan'].includes(selectedJob.kind) && ['failed', 'interrupted'].includes(selectedJob.status) && resumeModel" :disabled="resuming" @click="resumeRevision">{{ resuming ? '恢复中…' : selectedJob.kind === 'plan' ? '从检查点继续规划' : '从检查点继续修订' }}</button>
+        <button v-if="selectedJob?.can_resume && resumeModel" :disabled="resuming" @click="resumeRevision">{{ resuming ? '恢复中…' : selectedJob.kind === 'plan' ? '从检查点继续规划' : '从检查点继续修订' }}</button>
         <button v-if="selectedJob?.kind === 'plan' && selectedJob.status === 'completed' && selectedJob.result?.resumed" :disabled="resuming || savedPlanJob === selectedJob.id" @click="saveRecoveredPlan">{{ savedPlanJob === selectedJob.id ? '已保存到续写设定' : resuming ? '保存中…' : '保存恢复的规划到续写设定' }}</button>
         <div v-if="wikiOpened" class="wiki-log-details"><p v-if="!wikiEntries.length" class="muted-note">日志文件暂无记录。</p><details v-for="(entry, index) in wikiEntries" :key="index"><summary><span>{{ String(entry.event || '事件') }}</span><small>第 {{ entry.chapter ?? '—' }} 章 · 片段 {{ entry.chunk ?? '—' }} · {{ displayTime(String(entry.timestamp || '')) }}</small></summary><dl class="wiki-log-fields"><div v-for="field in detailFields(entry, ['timestamp', 'event'])" :key="field.key"><dt>{{ label(field.key) }}</dt><dd><pre v-if="field.key === 'prompt' || field.key === 'raw_response'">{{ field.value }}</pre><span v-else>{{ field.value }}</span></dd></div></dl></details></div>
         <div v-if="planOpened" class="wiki-log-details"><p v-if="!wikiEntries.length" class="muted-note">日志文件暂无记录。</p><details v-for="(entry, index) in wikiEntries" :key="index"><summary><span>{{ String(entry.event || '事件') }}</span><small>{{ String(entry.stage || '流程') }} · {{ displayTime(String(entry.timestamp || '')) }}</small></summary><dl class="wiki-log-fields"><div v-for="field in detailFields(entry, ['timestamp', 'event'])" :key="field.key"><dt>{{ field.label }}</dt><dd><pre v-if="field.key === 'prompt' || field.key === 'raw_response' || field.key === 'plan'">{{ field.value }}</pre><span v-else>{{ field.value }}</span></dd></div></dl></details></div>

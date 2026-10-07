@@ -54,3 +54,17 @@ test('rendering restored history does not modify stored events', () => {
   assert.deepEqual(chatTimeline(history), chatTimeline(history))
   assert.equal(JSON.stringify(history), original)
 })
+
+test('task cancellation remains pending until the worker actually stops', () => {
+  const rows = chatTimeline([
+    event(1,'task_status',{action_id:'a',status:'running',cancel_requested:true,can_cancel:true,elapsed_seconds:32}),
+  ])
+  assert.equal(rows[0].data.status,'cancelling')
+  assert.equal(rows[0].data.elapsed_seconds,32)
+  assert.equal(rows[0].data.action_id,'a')
+  const finished = chatTimeline([
+    event(1,'task_status',{action_id:'a',status:'running',cancel_requested:true}),
+    event(2,'task_result',{action_id:'a',status:'cancelled'}),
+  ])
+  assert.equal(finished[0].data.status,'cancelled')
+})

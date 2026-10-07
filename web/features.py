@@ -451,7 +451,7 @@ def register_features(app: FastAPI, workspace_root: str,
         from core.planning_workflow import read_planning_checkpoint, run_planning_workflow, planning_fingerprint
         path = project_path(project_id)
         job = jobs.get(path, job_id)
-        if not job or job.get("kind") != "plan" or job.get("status") not in ("failed", "interrupted"):
+        if not job or job.get("kind") != "plan" or job.get("status") not in ("failed", "interrupted", "cancelled"):
             raise HTTPException(400, "仅失败或中断的章节规划任务可恢复")
         thread_id = next((event.get("data", {}).get("workflow_thread") for event in job.get("events", [])
                           if event.get("data", {}).get("workflow_thread")), job_id)
@@ -897,7 +897,7 @@ def register_features(app: FastAPI, workspace_root: str,
         from core.chapter_revision import chapter_body
         path = project_path(project_id)
         job = jobs.get(path, job_id)
-        if not job or job.get("kind") != "revise" or job.get("status") not in ("failed", "interrupted"):
+        if not job or job.get("kind") != "revise" or job.get("status") not in ("failed", "interrupted", "cancelled"):
             raise HTTPException(400, "仅失败或中断的修订任务可恢复")
         thread_id = next((event.get("data", {}).get("workflow_thread") for event in job.get("events", [])
                           if event.get("data", {}).get("workflow_thread")), job_id)
@@ -1072,6 +1072,13 @@ def register_features(app: FastAPI, workspace_root: str,
     @app.get("/api/projects/{project_id}/jobs")
     def list_jobs(project_id: str):
         return jobs.list(project_path(project_id))
+
+    @app.post("/api/projects/{project_id}/jobs/{job_id}/cancel", dependencies=[Depends(_write_required)])
+    def cancel_job(project_id: str, job_id: str):
+        path = project_path(project_id)
+        if not jobs.get(path, job_id): raise HTTPException(404, '任务不存在')
+        try: return jobs.cancel(path, job_id)
+        except ValueError as exc: raise HTTPException(409,str(exc))
 
     @app.get("/api/projects/{project_id}/jobs/{job_id}")
     def get_job(project_id: str, job_id: str):
@@ -1361,6 +1368,12 @@ def register_features(app: FastAPI, workspace_root: str,
     def chat_request(data):
         return ChapterRequest(number=data['chapter'], model_name=data['model_name'],
                               requirements=data.get('requirements', ''))
+    def chat_illustration(project,data):
+        settings = settings_for_chapter(load_project_settings(project_path(project)),data['chapter'])
+        notes = str(settings.get('illustration_style_notes') or '')
+        requirements = str(data.get('requirements') or '').strip()
+        preview = {'illustration_style_notes':(notes+'\n'+requirements).strip()} if requirements else {}
+        return generate_illustration(project,data['chapter'],{'model_name':data['model_name'],'preview':preview})
     register_chat(app, workspace_root, project_path, llm, {
         'plan': lambda project, data: suggest_plan(project, chat_request(data)),
         'plan_revision': lambda project, data: revise_plan(project, chat_request(data)),
@@ -1369,4 +1382,8 @@ def register_features(app: FastAPI, workspace_root: str,
             requirements=data.get('requirements', ''))),
         'consistency': lambda project, data: consistency(project, chat_request(data)),
         'revise': lambda project, data: revise(project, chat_request(data)),
-    }, jobs, _write_required)
+        'illustration': chat_illustration,
+    }, jobs, _write_required, resume_tools={
+        'plan': lambda project, job_id, data: resume_plan(project,job_id,{'model_name':data['model_name']}),
+        'revise': lambda project, job_id, data: resume_revision(project,job_id,{'model_name':data['model_name']}),
+    })

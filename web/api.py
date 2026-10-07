@@ -235,6 +235,42 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                 "vector_status": vector_status,
                 "vector_job_id": vector_job.get("id") if vector_job else None}
 
+    def revision_preview(project_id, job_id):
+        from core.chapter_revision import chapter_body, check_chapter_candidate
+        project = project_path(project_id)
+        job = jobs.get(project,job_id)
+        if not job or job.get('kind') != 'revise' or job.get('status') != 'completed': raise HTTPException(404,'修订稿不存在或尚未完成')
+        result = job.get('result') or {}
+        number = result.get('chapter_number')
+        if type(number) is not int: raise HTTPException(400,'修订稿缺少章号')
+        _, path = existing_chapter(project_id,number)
+        current = path.read_text(encoding='utf-8')
+        title = current.splitlines()[0]
+        body = chapter_body(current,title)
+        candidate = str(result.get('candidate') or '').strip()
+        source = str(result.get('source') or '').strip()
+        settings = settings_for_chapter(load_project_settings(project),number)
+        issues = list(result.get('issues') or [])
+        issues.extend(check_chapter_candidate(candidate,source,str(result.get('requirements') or ''),settings))
+        return {'job_id':job_id,'chapter':number,'title':title,'source':source,'current':body,
+                'candidate':candidate,'revision':_revision(current),'issues':list(dict.fromkeys(issues)),
+                'outdated':body.strip() != source,'applied':body.strip() == candidate}
+
+    @app.get('/api/projects/{project_id}/revisions/{job_id}/preview')
+    def get_revision_preview(project_id: str, job_id: str):
+        return revision_preview(project_id,job_id)
+
+    def apply_revision(project_id,job_id,revision):
+        preview = revision_preview(project_id,job_id)
+        if preview['applied']: return {'saved':False,'applied':True,'number':preview['chapter']}
+        if preview['revision'] != revision: raise HTTPException(409,'正文已变化，请重新打开比较')
+        if preview['outdated']: raise HTTPException(409,'正文与生成修订稿时的原稿不同，不能直接覆盖')
+        if preview['issues']: raise HTTPException(400,'修订稿存在验收问题，请到修订页处理后应用')
+        text = f"{preview['title']}\n\n{preview['candidate']}\n"
+        return save_chapter(project_id,preview['chapter'],ChapterSave(text=text,revision=revision),local_header='1')
+
+    app.state.apply_chat_revision = apply_revision
+
     from web.features import register_features
     register_features(app, workspace_root, project_path, existing_chapter,
                       jobs, config_file)

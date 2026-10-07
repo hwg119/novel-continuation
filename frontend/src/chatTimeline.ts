@@ -1,6 +1,7 @@
 export type ChatEvent = { id: number; kind: string; time?: string; data: Record<string, any> }
 export type ProcessEntry = { id: number; time: string; text: string; level: string; details: Record<string, unknown> }
-export type ChatProcess = { key: string; label: string; status: string; entries: ProcessEntry[] }
+export type ChatProcess = { key: string; label: string; status: string; entries: ProcessEntry[];
+  action_id?: string; elapsed_seconds?: number; can_cancel?: boolean; cancel_requested?: boolean; stage?: string }
 
 /** Localize leaked internal navigation names in old and streamed assistant replies. */
 export function chatReplyText(text: string): string {
@@ -37,6 +38,9 @@ export function chatTimeline(events: ChatEvent[]): ChatEvent[] {
         .filter(([key]) => !['text','turn_id','time','level'].includes(key)))
       process.entries.push({ id: event.id, time: data.time || event.time || '',
         text: data.text || data.message || '', level: data.level || 'info', details })
+    } else if (event.kind === 'task_status') {
+      const process = group(event, `task:${data.action_id}`, '任务执行')
+      Object.assign(process, data, { status: data.cancel_requested && data.status === 'running' ? 'cancelling' : data.status })
     } else if (event.kind === 'action_status' && data.status === 'started') {
       group(event, `task:${data.action_id}`, '任务执行')
     } else if (['done','failed','cancelled','interrupted'].includes(event.kind)) {
@@ -49,7 +53,7 @@ export function chatTimeline(events: ChatEvent[]): ChatEvent[] {
       rows.push(event)
     } else if (event.kind === 'action_status') {
       if (data.status === 'interrupted') rows.push(event)
-    } else rows.push(event)
+    } else if (event.kind !== 'revision_applied') rows.push(event)
   }
   return rows
 }

@@ -108,7 +108,7 @@ def research_decision(model, initial, context, project, request, guide, emit, ru
         if not running(): raise InterruptedError('已停止回复')
         final = round_number == 3 or research.calls >= 6 or research.chars >= 32000
         prompt = guide + '\n' + RESEARCH_GUIDANCE + '\n依据资料重新判断本次操作，仅输出 JSON：'
-        prompt += '{"tool":"reply|navigate|view|plan|plan_revision|generate|consistency|revise","chapter":正整数或null,"navigation":["功能ID"],"research":[],"requirements":"操作要求","message":"说明或追问"}。'
+        prompt += '{"tool":"reply|navigate|view|plan|plan_revision|generate|consistency|revise|illustration","chapter":正整数或null,"navigation":["功能ID"],"research":[],"requirements":"操作要求","message":"说明或追问"}。生成章节插图选illustration，保留本次画面与风格要求。'
         if final:
             context['research_budget_exhausted'] = True
             prompt += '已达到查阅上限，research 必须为空，不要追加查阅；不足之处留在 message 中。'
