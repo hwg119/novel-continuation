@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from core.continuation import ContinuationLLM, _first_json_object
 from core.agent_skill import load_agent_skill
 from web.chat_navigation import FEATURES, navigation_links
+from web.chat_research import RESEARCH_GUIDANCE, research_decision
 from core.project_manager import chapter_path, list_chapter_files, load_project_settings, settings_for_chapter, save_project_settings
 from web.chat_store import ChatStore
 
@@ -20,6 +21,22 @@ class ChatMessage(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
     chapter: int | None = Field(default=None, ge=1)
     model_name: str = ''
+
+
+class AuditRevisionRequest(BaseModel):
+    model_name: str = ''
+    enhancements: list[str] = Field(default_factory=list, max_length=100)
+
+
+def audit_revision_requirements(result, selected):
+    main = str(result.get('revision_requirements') or '').strip()
+    chosen = [row for row in result.get('story_enhancements') or [] if row.get('id') in selected]
+    parts = ['【主线修订】\n' + main] if main else []
+    if chosen:
+        parts.append('【已选择的情节增强】\n' + '\n'.join(
+            f"{i + 1}. {row.get('scope') or ''}：{row.get('suggestion') or ''}\n保留：{row.get('preserve') or ''}"
+            for i, row in enumerate(chosen)))
+    return '\n\n'.join(parts)
 
 
 def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_required):
@@ -48,8 +65,9 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
             'text':job['message'],'chapter':data['chapter'],
             'view':{'plan':'settings','plan_revision':'settings','generate':'write',
                     'consistency':'quality','revise':'quality'}[data['tool']],
-            'tool':data['tool'],'result':{k:result[k] for k in
-                ('chapter_title','beats','planning_review','report','revision_requirements','candidate') if k in result}}
+            'tool':data['tool'],'model':data.get('model'), 'result':{k:result[k] for k in
+                ('chapter_title','beats','planning_review','report','revision_requirements','candidate',
+                 'story_summary','story_enhancements','issues') if k in result}}
 
     def session(project_id, ident):
         path = project_path(project_id)
@@ -133,9 +151,9 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                 guide, skill_metadata = load_agent_skill('project-guide')
                 store.emit(ident, 'progress', {'turn_id': turn, 'text': '已加载项目功能导航 Skill', 'details': skill_metadata})
                 context['project_features'] = FEATURES
-                prompt = guide + '\n\n' + '''你是小说创作工作台的对话助手。判断用户这次是讨论、查看，还是要求执行操作。
+                prompt = guide + '\n' + RESEARCH_GUIDANCE + '\n\n' + '''你是小说创作工作台的对话助手。判断用户这次是讨论、查看，还是要求执行操作。
 仅输出JSON：{"tool":"reply|navigate|view|plan|plan_revision|generate|consistency|revise",
-"chapter":正整数或null,"navigation":["功能ID"],"requirements":"完整且简练的操作要求","message":"向用户说明操作或追问"}。
+"chapter":正整数或null,"navigation":["功能ID"],"research":[],"requirements":"完整且简练的操作要求","message":"向用户说明操作或追问"}。
 讨论、评价、建议不授权修改；此时选reply。查看选view。回目分幕选plan，按问题修改分幕选plan_revision，
 续写选generate，故事审校选consistency，按明确要求修改正文选revise。
 不支持的操作说明限制，不编造执行结果。指代不明确就reply追问；不要擅自选择章号。
@@ -145,6 +163,9 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                 raw = model.complete(prompt, temperature=0.1, num_predict=1200, disable_thinking=True)
                 decision = _first_json_object(raw)
                 if not isinstance(decision, dict): raise ValueError('未返回有效操作判断，请重新描述请求')
+                decision = research_decision(model, decision, context, path, payload.text, guide,
+                    lambda text, details: store.emit(ident, 'progress', {'turn_id':turn,'text':text,'details':details}),
+                    lambda: store.running(turn))
                 if not store.running(turn): return
                 tool = decision.get('tool', 'reply')
                 number = decision.get('chapter')
@@ -183,7 +204,8 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                         if not store.running(turn): raise InterruptedError('已停止回复')
                         store.emit(ident, 'delta', {'turn_id': turn, 'text': text})
                     response = model.complete(guide + '\n根据下面资料回答用户，只输出自然语言。页面入口由程序提供按钮，不需要编写链接。不要宣称操作已执行；'
-                        '若资料截断，说明不能据此评价完整章节。\n' + json.dumps(context, ensure_ascii=False)
+                        '正文查阅证据优先于初始截取和摘要；只有完整读过的章节才可作整章评价。'
+                        '区分正文、摘要与 Wiki，必要时以章节号和 D 编号说明依据；重要资料不足或查阅达到上限应说明。\n' + json.dumps(context, ensure_ascii=False)
                         + '\n用户：' + payload.text + '\n处理提示：' + str(decision.get('message') or ''),
                         system='你是小说创作助手，简练地回答，区分事实与建议。',
                         num_predict=2200, disable_thinking=True, on_chunk=chunk)
@@ -228,6 +250,28 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         if not save_project_settings(path,settings): raise HTTPException(500,'规划保存失败')
         store.emit(ident,'plan_saved',{'action_id':action,'text':f"第 {data['chapter']} 章分幕已保存"})
         return {'saved': True}
+
+    @app.post(base + '/{ident}/actions/{action}/revise-audit', dependencies=[Depends(write_required)])
+    def revise_audit(project_id: str, ident: str, action: str, payload: AuditRevisionRequest):
+        path, _ = session(project_id, ident)
+        item = store.get_action(ident, action)
+        if not item or item['data'].get('tool') != 'consistency': raise HTTPException(400, '该卡片不是故事审校结果')
+        job = jobs.get(path, item['job']) if item['job'] else None
+        if not job or job['status'] != 'completed': raise HTTPException(400, '审校尚未完成')
+        result = job.get('result') or {}
+        valid = {row.get('id') for row in result.get('story_enhancements') or []}
+        if any(key not in valid for key in payload.enhancements): raise HTTPException(400, '所选增强意见不属于该审校记录')
+        requirements = audit_revision_requirements(result, payload.enhancements)
+        if not requirements: raise HTTPException(400, '没有主线修订要求，请先勾选增强意见')
+        config = llm_config(payload.model_name)
+        number = item['data']['chapter']
+        data = {'tool':'revise','chapter':number,'requirements':requirements,
+                'model_name':payload.model_name,'model':config.get('model_name'),
+                'message':'按本次审校的主线要求及所选增强生成修订稿，不自动应用正文。',
+                'audit_job':job['id'],'enhancements':sorted(set(payload.enhancements))}
+        key = hashlib.sha256(json.dumps({'audit':action,'model':payload.model_name,'selected':data['enhancements']},sort_keys=True).encode()).hexdigest()
+        ident_action = store.action(ident, data, dedupe_key=key)
+        return confirm(project_id, ident, ident_action)
 
     @app.post(base + '/{ident}/actions/{action}/confirm', dependencies=[Depends(write_required)])
     def confirm(project_id: str, ident: str, action: str):
@@ -276,8 +320,12 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         except ValueError: raise HTTPException(400, '事件序号无效')
         async def events():
             nonlocal cursor
-            while not await request.is_disconnected():
+            def stopping():
+                signal = getattr(app.state, 'shutdown_requested', None)
+                return signal is not None and signal.is_set()
+            while not stopping() and not await request.is_disconnected():
                 rows = await asyncio.to_thread(store.events, ident, cursor)
+                if stopping(): break
                 for row in rows:
                     cursor = row['id']
                     yield f'id: {cursor}\ndata: {json.dumps(row, ensure_ascii=False)}\n\n'

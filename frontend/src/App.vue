@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, defineComponent, h, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, writeOptions, type Job } from './api'
 import ProjectsPanel from './ProjectsPanel.vue'
 import SettingsPanel from './SettingsPanel.vue'
@@ -9,7 +9,18 @@ import ConfigPanel from './ConfigPanel.vue'
 import WikiPanel from './WikiPanel.vue'
 import RelationGraphPanel from './RelationGraphPanel.vue'
 import HomePanel from './HomePanel.vue'
-const ChatPanel = defineAsyncComponent(() => import('./ChatPanel.vue'))
+import AsyncPageNotice from './AsyncPageNotice.vue'
+const ChatPanel = defineAsyncComponent({
+  loader: () => import('./ChatPanel.vue'),
+  loadingComponent: AsyncPageNotice,
+  errorComponent: defineComponent({ setup: () => () => h(AsyncPageNotice, { failed: true }) }),
+  delay: 150,
+  timeout: 15000,
+  onError(error, retry, fail, attempts) {
+    if (attempts < 2) retry()
+    else fail()
+  },
+})
 import RevisionPanel from './RevisionPanel.vue'
 import TaskDrawer from './TaskDrawer.vue'
 import ConfirmDialog from './ConfirmDialog.vue'

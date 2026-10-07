@@ -248,7 +248,9 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                 raise HTTPException(404, "API 路由不存在；请检查后端版本")
             target = (dist / page).resolve()
             if target.is_file() and target.is_relative_to(dist):
-                return FileResponse(target)
-            return FileResponse(dist / "index.html")
+                return FileResponse(target, headers={'Cache-Control':'no-cache'} if target.name == 'index.html' else None)
+            if page.startswith('assets/'):
+                raise HTTPException(404, '前端资源已更新，请刷新页面')
+            return FileResponse(dist / "index.html", headers={'Cache-Control':'no-cache'})
 
     return app

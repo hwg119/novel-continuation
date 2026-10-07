@@ -139,7 +139,8 @@ async function refresh() {
       api<GenerationLog[]>(`/api/projects/${props.projectId}/logs`),
     ])
     jobs.value = newJobs; logs.value = newLogs
-    const target = props.focusJob && records.value.find(item => item.type === 'job' && item.id === props.focusJob)
+    const requested = new URLSearchParams(window.location.search).get('job') || props.focusJob
+    const target = requested && records.value.find(item => item.type === 'job' && item.id === requested)
     if (!selected.value && (target || records.value.length)) await choose(target || records.value[0]!)
     else if (selected.value && !records.value.some(item => item.id === selected.value?.id)) selected.value = null
   } catch (cause) { error.value = String(cause) }

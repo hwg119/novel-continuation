@@ -125,9 +125,11 @@ class ChatStore:
                                  (status, turn, session)).rowcount
             if changed: self._event(db, session, status, {'turn_id': turn, 'text': text})
 
-    def action(self, session, data):
-        ident = uuid.uuid4().hex
+    def action(self, session, data, dedupe_key=None):
+        ident = uuid.uuid5(uuid.NAMESPACE_URL, session + ':' + dedupe_key).hex if dedupe_key else uuid.uuid4().hex
         with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM actions WHERE id=? AND session=?', (ident, session)).fetchone(): return ident
             db.execute('INSERT INTO actions VALUES(?,?,?,?,?)',
                        (ident, session, json.dumps(data, ensure_ascii=False), 'pending', None))
             self._event(db, session, 'action', {'action_id': ident, **data})

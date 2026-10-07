@@ -91,3 +91,12 @@ test('conversation entry is separated from the feature navigation', () => {
   assert.match(component, /class="conversation-entry"/)
   assert.match(component, /功能工作台/)
 })
+
+test('chat lazy loading has visible loading and failure recovery instead of a blank panel', () => {
+  const component = readFileSync(new URL('./App.vue', import.meta.url), 'utf8')
+  assert.match(component, /loadingComponent: AsyncPageNotice/)
+  assert.match(component, /errorComponent: defineComponent/)
+  assert.match(component, /timeout: 15000/)
+  const notice = readFileSync(new URL('./AsyncPageNotice.vue', import.meta.url), 'utf8')
+  assert.match(notice, /刷新并重新打开/)
+})

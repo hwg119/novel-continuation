@@ -94,8 +94,11 @@ async function loadDrafts(selectId = '') {
     const records = await api<RevisionDraft[]>(
       `/api/projects/${props.projectId}/chapters/${props.chapterNumber}/revisions`)
     drafts.value = records.filter(item => item.kind === 'ai_draft')
-    const next = selectId && drafts.value.some(item => item.id === selectId)
-      ? selectId : drafts.value[0]?.id || ''
+    const params = new URLSearchParams(window.location.search)
+    const requested = selectId || params.get('revision') || ''
+    const importingAudit = !!params.get('audit') && params.get('import_requirements') === '1'
+    const next = requested ? drafts.value.find(item => item.id === requested)?.id || '' : importingAudit ? '' : drafts.value[0]?.id || ''
+    if (requested && !next) feedback.value = '指定修订稿不存在或尚未完成，请从历史记录选择；没有自动切换到其他版本。'
     selectedDraft.value = next
     if (next) restoreDraft(next)
   } catch (cause) { error.value = String(cause) }
@@ -118,10 +121,22 @@ async function loadAudits(selectId = '') {
   try {
     audits.value = await api<AuditRecord[]>(
       `/api/projects/${props.projectId}/chapters/${props.chapterNumber}/audits`)
-    const next = selectId && audits.value.some(item => item.id === selectId)
-      ? selectId : audits.value[0]?.id || ''
+    const params = new URLSearchParams(window.location.search)
+    const requested = selectId || params.get('audit') || ''
+    const next = requested ? audits.value.find(item => item.id === requested)?.id || '' : audits.value[0]?.id || ''
+    if (requested && !next) feedback.value = '指定审校记录不存在或尚未完成，请从历史记录选择。'
     selectedAudit.value = next
-    if (next) restoreAudit(next)
+    if (next) {
+      restoreAudit(next)
+      if (params.get('audit') === next && params.get('import_requirements') === '1') {
+        try {
+          const chosen = JSON.parse(params.get('enhancements') || '[]')
+          if (Array.isArray(chosen)) selectedEnhancements.value = enhancements.value
+            .filter(item => chosen.includes(item.id)).map(item => item.id)
+        } catch { selectedEnhancements.value = [] }
+        useAuditRequirements()
+      }
+    }
   } catch (cause) { error.value = String(cause) }
 }
 

@@ -26,7 +26,11 @@ async function load() {
   if (!props.projectId || !props.chapterNumber) return
   try {
     drafts.value = await api<Draft[]>(`/api/projects/${props.projectId}/chapters/${props.chapterNumber}/revisions`)
-    selected.value = drafts.value[0]?.id || ''; error.value = ''
+    const params = new URLSearchParams(window.location.search)
+    const requested = params.get('revision') || ''
+    selected.value = requested ? drafts.value.find(item => item.id === requested)?.id || '' : drafts.value[0]?.id || ''
+    mode.value = params.get('mode') === 'draft' ? 'draft' : 'compare'
+    error.value = requested && !selected.value ? '指定修订稿不存在或尚未完成，没有自动切换到其他版本。' : ''
   } catch (cause) { error.value = String(cause) }
 }
 watch(() => [props.projectId, props.chapterNumber], () => { void load() })
