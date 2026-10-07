@@ -866,6 +866,15 @@ def register_features(app: FastAPI, workspace_root: str,
         path, chapter_file = existing_chapter(project_id, payload.number)
         source_file = chapter_file.read_text(encoding="utf-8")
         source = chapter_body(payload.text or source_file, source_file.splitlines()[0])
+        original_source = chapter_body(source_file, source_file.splitlines()[0])
+        baseline_job = None
+        if not payload.text or source.strip() == original_source.strip():
+            from web.revision_baseline import latest_candidate
+            baseline_job = latest_candidate(path, payload.number, original_source)
+            if baseline_job:
+                source = baseline_job['result']['candidate']
+        else:
+            original_source = source
         requirements = payload.requirements
         if payload.revision_mode == "polish":
             from core.prose_polish import polish_requirements
@@ -880,13 +889,19 @@ def register_features(app: FastAPI, workspace_root: str,
             audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""),
                                   payload.number, secrets=(model_cfg.get("api_key", ""),))
             update("已创建完整修订日志", {"log_path": str(audit.path)})
+            baseline = {"kind": "candidate" if baseline_job else "saved_or_editor",
+                        "job_id": baseline_job['id'] if baseline_job else None,
+                        "chars": len(source)}
+            audit.write("revision_baseline", **baseline)
+            update("修订基准：上一份候选稿" if baseline_job else "修订基准：正文或编辑内容", baseline)
             update("已启用 LangGraph 修订流程", {"workflow_thread": job_id,
                    "model_name": payload.model_name, "chapter_number": payload.number})
             return run_revision_workflow(path, job_id, ContinuationLLM(model_cfg), update, audit,
                 initial={"source": source, "title": title, "requirements": requirements,
                          "settings": settings, "chapter_number": payload.number,
                          "model_name": payload.model_name, "attempt": 0,
-                         "revision_mode": payload.revision_mode})
+                         "revision_mode": payload.revision_mode,
+                         "original_source": original_source, "baseline": baseline})
 
         return jobs.start(path, "revise", work, pass_job_id=True)
 
@@ -909,7 +924,7 @@ def register_features(app: FastAPI, workspace_root: str,
             raise HTTPException(400, "请确认原修订任务使用的模型")
         _, chapter_file = existing_chapter(project_id, state["chapter_number"])
         current = chapter_file.read_text(encoding="utf-8")
-        if chapter_body(current, current.splitlines()[0]) != state["source"]:
+        if chapter_body(current, current.splitlines()[0]) != state.get("original_source", state["source"]):
             raise HTTPException(409, "正文已变化或原任务使用了未保存的编辑内容，请重新生成建议稿")
         model_cfg = llm(state["model_name"])
         def work(update, new_job_id):

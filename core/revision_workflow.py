@@ -8,6 +8,8 @@ from typing import TypedDict
 
 class RevisionState(TypedDict, total=False):
     source: str
+    original_source: str
+    baseline: dict
     title: str
     requirements: str
     settings: dict
@@ -110,7 +112,9 @@ def run_revision_workflow(project_dir, thread_id, model, update, audit, initial=
     return {"chapter_number": result["chapter_number"], "candidate": result["candidate"],
             "issues": result["issues"], "source": result["source"], "requirements": result["requirements"],
             "log_path": str(audit.path), "workflow": "langgraph", "workflow_thread": thread_id,
-            "model_name": result["model_name"], "revision_mode": result.get("revision_mode", "whole")}
+            "model_name": result["model_name"], "revision_mode": result.get("revision_mode", "whole"),
+            "original_source": result.get("original_source", result["source"]),
+            "baseline": result.get("baseline", {})}
 
 
 def read_revision_checkpoint(project_dir, thread_id):

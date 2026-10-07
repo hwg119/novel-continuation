@@ -248,24 +248,26 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
         title = current.splitlines()[0]
         body = chapter_body(current,title)
         candidate = str(result.get('candidate') or '').strip()
-        source = str(result.get('source') or '').strip()
+        source = str(result.get('original_source', result.get('source')) or '').strip()
         settings = settings_for_chapter(load_project_settings(project),number)
-        issues = list(result.get('issues') or [])
-        issues.extend(check_chapter_candidate(candidate,source,str(result.get('requirements') or ''),settings))
+        warnings = list(result.get('issues') or [])
+        blocking_issues = check_chapter_candidate(candidate,source,str(result.get('requirements') or ''),settings)
         return {'job_id':job_id,'chapter':number,'title':title,'source':source,'current':body,
-                'candidate':candidate,'revision':_revision(current),'issues':list(dict.fromkeys(issues)),
+                'candidate':candidate,'revision':_revision(current),'issues':list(dict.fromkeys(warnings + blocking_issues)),
+                'warnings':warnings,'blocking_issues':blocking_issues,
                 'outdated':body.strip() != source,'applied':body.strip() == candidate}
 
     @app.get('/api/projects/{project_id}/revisions/{job_id}/preview')
     def get_revision_preview(project_id: str, job_id: str):
         return revision_preview(project_id,job_id)
 
-    def apply_revision(project_id,job_id,revision):
+    def apply_revision(project_id,job_id,revision,confirm_warnings=False):
         preview = revision_preview(project_id,job_id)
         if preview['applied']: return {'saved':False,'applied':True,'number':preview['chapter']}
         if preview['revision'] != revision: raise HTTPException(409,'正文已变化，请重新打开比较')
         if preview['outdated']: raise HTTPException(409,'正文与生成修订稿时的原稿不同，不能直接覆盖')
-        if preview['issues']: raise HTTPException(400,'修订稿存在验收问题，请到修订页处理后应用')
+        if preview['blocking_issues']: raise HTTPException(400,'修订稿未通过基础校验，请到修订页处理后应用')
+        if preview['warnings'] and not confirm_warnings: raise HTTPException(400,'请先核对模型验收提醒，并确认仍要应用')
         text = f"{preview['title']}\n\n{preview['candidate']}\n"
         return save_chapter(project_id,preview['chapter'],ChapterSave(text=text,revision=revision),local_header='1')
 

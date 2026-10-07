@@ -593,6 +593,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
       </div>
     </section>
     <template v-if="chapterNumber !== null"><div v-if="!bookMode" class="editor-meta"><span>第 {{ chapterNumber }} 章</span><span>{{ readingMode === 'original' ? `${wordCount.toLocaleString('zh-CN')} 字 · Ctrl+S 保存` : '分级双语阅读' }}</span></div>
+      <p v-if="!bookMode" class="chapter-generation-time" style="margin:0 0 12px;color:var(--muted, #6b8581);font-size:13px">最后生成时间：{{ chapters.find(item => item.number === chapterNumber)?.generated_at || '暂无生成记录（导入章节或历史记录缺失）' }}</p>
       <div v-if="!bookMode" class="reading-view-row"><div class="reading-mode-switch" role="tablist" aria-label="正文阅读模式"><button role="tab" :aria-selected="readingMode === 'original'" :class="{ active: readingMode === 'original' }" @click="readingMode = 'original'">原文与编辑</button><button role="tab" :aria-selected="readingMode === 'learning'" :class="{ active: readingMode === 'learning' }" @click="readingMode = 'learning'">英语学习版</button></div><button type="button" class="enter-book-mode" @click="enterBookMode">看书模式</button></div>
       <h1>{{ title }}</h1>
       <figure v-if="chapterIllustrationUrl" class="chapter-front-illustration"><img :src="chapterIllustrationUrl" :alt="`第 ${chapterNumber} 章插图`"><figcaption>本章插图</figcaption></figure>

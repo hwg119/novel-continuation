@@ -261,7 +261,7 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         if not item or item['data'].get('tool') != 'revise' or not item['job']: raise HTTPException(400,'该卡片不是已生成的正文修订稿')
         revision = payload.get('revision')
         if not isinstance(revision,str): raise HTTPException(400,'请先查看差异')
-        result = app.state.apply_chat_revision(project_id,item['job'],revision)
+        result = app.state.apply_chat_revision(project_id,item['job'],revision,confirm_warnings=payload.get('confirm_warnings') is True)
         store.emit(ident,'revision_applied',{'action_id':action,'job_id':item['job'],'chapter':item['data']['chapter'],
                                          'text':'修订稿已应用并保存正文'})
         return result
