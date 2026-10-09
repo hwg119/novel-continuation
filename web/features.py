@@ -792,12 +792,12 @@ def register_features(app: FastAPI, workspace_root: str,
         return jobs.start(path, "summary", work)
 
     @app.get("/api/projects/{project_id}/chapters/{number}/learning/{level}")
-    def get_learning_edition(project_id: str, number: int, level: str):
+    def get_learning_edition(project_id: str, number: int, level: str, load: str = 'light'):
         from core.learning_edition import read_learning_edition
         path, chapter_file = existing_chapter(project_id, number)
         try:
             return read_learning_edition(
-                path, number, level, chapter_file.read_text(encoding="utf-8"))
+                path, number, level, chapter_file.read_text(encoding="utf-8"), load=load)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -805,7 +805,9 @@ def register_features(app: FastAPI, workspace_root: str,
               dependencies=[Depends(_write_required)])
     def create_learning_edition(project_id: str, number: int, level: str, payload: dict):
         from core.continuation import ContinuationLLM
-        from core.learning_edition import LEVELS, generate_learning_edition
+        from core.learning_edition import LEVELS, LOADS, generate_learning_edition
+        load = str(payload.get('load') or 'light')
+        if load not in LOADS: raise HTTPException(400, '学习负担无效')
         if level not in LEVELS:
             raise HTTPException(400, "英语学习级别无效")
         path, chapter_file = existing_chapter(project_id, number)
@@ -817,7 +819,7 @@ def register_features(app: FastAPI, workspace_root: str,
                     "model": model_cfg.get("model_name", "")})
             return generate_learning_edition(
                 path, number, chapter_file.read_text(encoding="utf-8"), level,
-                ContinuationLLM(model_cfg), progress=update)
+                ContinuationLLM(model_cfg), progress=update, load=load)
 
         return jobs.start(path, "learning", work)
 
@@ -834,26 +836,31 @@ def register_features(app: FastAPI, workspace_root: str,
             raise HTTPException(400, "学习版 Word 模式无效")
         path, chapter_file = existing_chapter(project_id, number)
         text = chapter_file.read_text(encoding="utf-8")
-        edition = read_learning_edition(path, number, level, text)
+        from core.learning_edition import LOADS
+        load = str(payload.get('load') or 'light')
+        if load not in LOADS: raise HTTPException(400, '学习负担无效')
+        edition = read_learning_edition(path, number, level, text, load=load)
         if not edition.get("valid"):
             raise HTTPException(400, "请先生成与当前正文一致的英语学习版")
         title = text.partition("\n")[0]
         image = illustration_path(path, number)
         svg = (image.read_text(encoding="utf-8")
                if bool(payload.get("include_illustration", True)) and image.is_file() else None)
-        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{mode}.docx"
+        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{load}_{mode}.docx"
         return export_learning_docx(
             title, edition, str(target), chapter_number=number, mode=mode,
             include_vocabulary=bool(payload.get("include_vocabulary", True)),
             illustration_svg=svg)
 
     @app.get("/api/projects/{project_id}/chapters/{number}/learning/{level}/export/{mode}")
-    def download_learning_word(project_id: str, number: int, level: str, mode: str):
+    def download_learning_word(project_id: str, number: int, level: str, mode: str, load: str = 'light'):
         from core.learning_edition import LEVELS
         if level not in LEVELS or mode not in ("inline", "endnotes", "exercise"):
             raise HTTPException(404, "英语学习版 Word 不存在")
         path = project_path(project_id)
-        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{mode}.docx"
+        from core.learning_edition import LOADS
+        if load not in LOADS: raise HTTPException(400, '学习负担无效')
+        target = Path(path) / "exports" / f"chapter_{number}_learning_{level}_{load}_{mode}.docx"
         if not target.is_file():
             raise HTTPException(404, "请先生成英语学习版 Word")
         return FileResponse(target, filename=target.name)

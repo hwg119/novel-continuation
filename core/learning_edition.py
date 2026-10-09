@@ -9,12 +9,17 @@ from pathlib import Path
 
 
 LEARNING_VERSION = 1
+LOADS = {
+    'light': {'label': '轻量', 'coverage': .10, 'words': 5},
+    'standard': {'label': '标准', 'coverage': .20, 'words': 8},
+    'challenge': {'label': '挑战', 'coverage': .30, 'words': 12},
+}
 LEVELS = {
-    "primary": {"label": "小学高年级", "coverage": 0.18, "max_chars": 36,
+    "primary": {"label": "小学高年级", "max_chars": 36,
                 "max_annotations": 3, "guide": "CEFR A1-A2，使用短句和高频基础词"},
-    "junior": {"label": "初中", "coverage": 0.35, "max_chars": 58,
+    "junior": {"label": "初中", "max_chars": 58,
                "max_annotations": 3, "guide": "CEFR A2-B1，使用自然的常见叙事表达"},
-    "senior": {"label": "高中", "coverage": 0.55, "max_chars": 90,
+    "senior": {"label": "高中", "max_chars": 90,
                "max_annotations": 2, "guide": "CEFR B1-B2，保留适度的小说语气和句式变化"},
 }
 SENTENCE_RE = re.compile(r".*?(?:[。！？!?…]+[”’』」]?|$)", re.DOTALL)
@@ -26,10 +31,10 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _path(project_dir: str, number: int, level: str) -> Path:
+def _path(project_dir: str, number: int, level: str, load: str = 'light') -> Path:
     directory = Path(project_dir) / "learning_editions"
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"chapter_{int(number)}_{level}.json"
+    return directory / f"chapter_{int(number)}_{level}_{load}.json"
 
 
 def _plain_length(text: str) -> int:
@@ -60,7 +65,7 @@ def _split_body(text: str) -> list[dict]:
     return blocks
 
 
-def _select_segments(blocks: list[dict], level: str) -> list[dict]:
+def _select_segments(blocks: list[dict], level: str, load: str = 'light') -> list[dict]:
     preset = LEVELS[level]
     groups = []
     total = 0
@@ -76,9 +81,19 @@ def _select_segments(blocks: list[dict], level: str) -> list[dict]:
                 candidates.append((length + dialogue_bonus, segment))
         if candidates:
             groups.append([segment for _, segment in sorted(candidates, key=lambda item: item[0])])
-    target = max(1, int(total * preset["coverage"])) if total else 0
+    target = int(total * LOADS[load]["coverage"])
     selected = []
     covered = 0
+    # 在整章各处取样，而不是把英文预算全部用在开头。
+    ordered = []
+    def spread(start, end):
+        if start >= end: return
+        middle = (start + end) // 2
+        ordered.append(groups[middle])
+        spread(start, middle)
+        spread(middle + 1, end)
+    spread(0, len(groups))
+    groups = ordered
     # 每轮从各自然段取一个较简单句，使英文在章节中均匀出现。
     depth = 0
     while covered < target:
@@ -87,14 +102,18 @@ def _select_segments(blocks: list[dict], level: str) -> list[dict]:
             if depth >= len(group):
                 continue
             segment = group[depth]
+            length = _plain_length(segment['source'])
+            if covered + length > target:
+                continue
             selected.append(segment)
-            covered += _plain_length(segment["source"])
+            covered += length
             added = True
             if covered >= target:
                 break
         if not added:
             break
         depth += 1
+        break  # 每个自然段最多一句英文，不为凑占比继续翻译。
     return selected
 
 
@@ -146,6 +165,7 @@ def _translate_batch(llm, rows: list[dict], level: str) -> dict[str, dict]:
 4. annotations 只标注超出目标水平、但理解本句确有帮助的词；最多 {preset['max_annotations']} 个。
 5. annotations 每项包含 word 和简短中文 meaning；word 必须原样出现在 translation 中。
 6. 高频基础词不要注释；没有难词时 annotations 返回空数组。
+   尽量用目标水平已知的常用词表达原意，不刻意引入难词；简化措辞但不能简化事实。
 7. 只输出 JSON 数组，保持输入 id，不要输出解释或 Markdown。
 
 输出格式：
@@ -185,10 +205,11 @@ def _translate_batch(llm, rows: list[dict], level: str) -> dict[str, dict]:
 
 
 def read_learning_edition(project_dir: str, number: int, level: str,
-                          chapter_text: str) -> dict:
+                          chapter_text: str, load: str = 'light') -> dict:
     if level not in LEVELS:
         raise ValueError("英语学习级别无效")
-    target = _path(project_dir, number, level)
+    if load not in LOADS: raise ValueError('学习负担无效')
+    target = _path(project_dir, number, level, load)
     empty = {"chapter": number, "level": level, "level_label": LEVELS[level]["label"],
              "exists": False, "valid": False, "blocks": [], "stats": {}}
     if not target.is_file():
@@ -204,11 +225,12 @@ def read_learning_edition(project_dir: str, number: int, level: str,
 
 
 def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
-                              level: str, llm, progress=None) -> dict:
+                              level: str, llm, progress=None, load: str = 'light') -> dict:
     if level not in LEVELS:
         raise ValueError("英语学习级别无效")
+    if load not in LOADS: raise ValueError('学习负担无效')
     blocks = _split_body(chapter_text)
-    selected = _select_segments(blocks, level)
+    selected = _select_segments(blocks, level, load)
     if not selected:
         raise ValueError("本章没有适合生成英语学习版的中文句子")
     translated = {}
@@ -231,11 +253,16 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
             raise last_error
     translated_chars = 0
     annotation_count = 0
+    introduced = set()
     for block in blocks:
         for segment in block["segments"]:
             item = translated.get(segment["id"])
             if not item:
                 continue
+            new_words = {note['word'].casefold() for note in item['annotations']} - introduced
+            if len(introduced | new_words) > LOADS[load]['words']:
+                continue  # 保留中文，不通过隐藏难词释义假装降低学习负担。
+            introduced.update(new_words)
             segment["translated"] = True
             segment["translation"] = item["translation"]
             segment["annotations"] = item["annotations"]
@@ -248,15 +275,18 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
         "version": LEARNING_VERSION,
         "chapter": int(number),
         "level": level,
+        "load": load,
+        "load_label": LOADS[load]['label'],
         "level_label": LEVELS[level]["label"],
         "source_hash": _digest(chapter_text),
         "blocks": blocks,
         "stats": {"segments": sum(len(block["segments"]) for block in blocks),
-                  "translated_segments": len(selected),
+                  "translated_segments": sum(s['translated'] for b in blocks for s in b['segments']),
+                  "new_words": len(introduced),
                   "coverage": round(translated_chars / max(total_chars, 1), 3),
                   "annotations": annotation_count},
     }
-    target = _path(project_dir, number, level)
+    target = _path(project_dir, number, level, load)
     temp = target.with_suffix(".tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(target)
