@@ -1,4 +1,6 @@
 """Project capability IDs resolve to existing frontend views, never model-provided URLs."""
+import json
+
 FEATURES = {
     'project_import': {'view': 'projects', 'label': '打开工程与母本', 'help': '新建工程；导入已有工程目录或 project.json；选择 TXT 母本文件切分导入；更新向量库。'},
     'model_config': {'view': 'config', 'label': '打开全局配置', 'help': '配置大模型、默认模型、向量模型并测试连接。'},
@@ -28,3 +30,10 @@ def navigation_links(ids, chapter=None):
         if len(links) == 3:
             break
     return links
+
+
+def reply_navigation_context(links):
+    """Expose rendered links, not the full capability catalogue, to reply generation."""
+    return '\n【本次实际提供的跳转按钮】\n' + json.dumps(links, ensure_ascii=False) + (
+        '\n仅可指引用户点击此清单内的按钮，名称必须一致。功能目录和处理提示不是按钮清单。'
+        '清单为空时禁止说“点击下方按钮”，改为说明左侧导航入口。\n')

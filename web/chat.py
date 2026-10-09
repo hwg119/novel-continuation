@@ -206,7 +206,8 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                     def chunk(text):
                         if not store.running(turn): raise InterruptedError('已停止回复')
                         store.emit(ident, 'delta', {'turn_id': turn, 'text': text})
-                    response = model.complete(guide + '\n根据下面资料回答用户，只输出自然语言。页面入口由程序提供按钮，不需要编写链接。不要宣称操作已执行；'
+                    from web.chat_navigation import reply_navigation_context
+                    response = model.complete(guide + reply_navigation_context(links) + '\n根据下面资料回答用户，只输出自然语言。页面入口由程序提供按钮，不需要编写链接。不要宣称操作已执行；'
                         '正文查阅证据优先于初始截取和摘要；只有完整读过的章节才可作整章评价。'
                         '区分正文、摘要与 Wiki，必要时以章节号和 D 编号说明依据；重要资料不足或查阅达到上限应说明。\n' + json.dumps(context, ensure_ascii=False)
                         + '\n用户：' + payload.text + '\n处理提示：' + str(decision.get('message') or ''),
@@ -286,6 +287,29 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                 'message':'从原模型的检查点继续，候选稿不会自动应用。'}
         next_action = store.action(ident,data,dedupe_key='resume:'+action)
         return confirm(project_id,ident,next_action)
+
+    @app.post(base + '/{ident}/actions/{action}/audit-chapter', dependencies=[Depends(write_required)])
+    def audit_chat_chapter(project_id: str, ident: str, action: str, payload: AuditRevisionRequest):
+        path, _ = session(project_id, ident)
+        item = store.get_action(ident, action)
+        if not item or item['data'].get('tool') not in ('generate', 'revise'):
+            raise HTTPException(400, '该卡片不是正文生成或修订结果')
+        job = jobs.get(path, item['job']) if item['job'] else None
+        if not job or job['status'] != 'completed':
+            raise HTTPException(400, '正文任务尚未完成')
+        number = item['data']['chapter']
+        source = Path(chapter_path(path, number))
+        if not source.is_file(): raise HTTPException(400, '该章正文尚不存在')
+        if item['data']['tool'] == 'revise':
+            from core.chapter_revision import chapter_body
+            current = source.read_text(encoding='utf-8')
+            if chapter_body(current, current.splitlines()[0]).strip() != str((job.get('result') or {}).get('candidate') or '').strip():
+                raise HTTPException(400, '请先在对话中比较并应用修订稿，再审校已保存正文')
+        config = llm_config(payload.model_name)
+        next_action = store.action(ident, {'tool':'consistency','chapter':number,
+            'requirements':'','model_name':payload.model_name,'model':config.get('model_name'),
+            'message':'在当前对话中审校已保存正文，结果与后续修订均在这里处理。'})
+        return confirm(project_id, ident, next_action)
 
     @app.post(base + '/{ident}/actions/{action}/revise-audit', dependencies=[Depends(write_required)])
     def revise_audit(project_id: str, ident: str, action: str, payload: AuditRevisionRequest):

@@ -387,29 +387,35 @@ def export_learning_docx(title: str, edition: dict, output_path: str,
                 source_run.font.color.rgb = RGBColor(105, 119, 116)
 
     if mode == "endnotes" and references:
-        doc.add_page_break()
         heading = doc.add_heading("章末原句索引", level=1)
+        heading.paragraph_format.space_before = Pt(6)
+        heading.paragraph_format.space_after = Pt(3)
+        heading.paragraph_format.keep_with_next = True
         for run in heading.runs:
+            run.font.size = Pt(11)
             run.font.color.rgb = RGBColor(0, 0, 0)
         index_table = doc.add_table(rows=1, cols=3)
         index_table.autofit = False
-        widths = (Inches(0.4), Inches(3.1), Inches(3.0))
+        widths = (Inches(0.32), Inches(3.48), Inches(3.06))
         headers = index_table.rows[0].cells
         labels = ("编号", "英文句", "中文原句")
         for cell, label, width in zip(headers, labels, widths):
             cell.width = width
             cell.text = label
             set_cell_shading(cell, "E5EEEA")
-            set_cell_margins(cell, top=55, bottom=55)
+            set_cell_margins(cell, top=20, bottom=20, start=45, end=45)
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             para = cell.paragraphs[0]
             para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             para.paragraph_format.space_before = Pt(0)
             para.paragraph_format.space_after = Pt(0)
             para.paragraph_format.line_spacing = 1.0
+            grid = OxmlElement("w:snapToGrid")
+            grid.set(qn("w:val"), "0")
+            para._p.get_or_add_pPr().append(grid)
             for run in para.runs:
                 run.font.name = "Microsoft YaHei"
-                run.font.size = Pt(8.5)
+                run.font.size = Pt(8)
                 run.font.bold = True
                 run.font.color.rgb = RGBColor(0, 0, 0)
         row_properties = index_table.rows[0]._tr.get_or_add_trPr()
@@ -422,7 +428,7 @@ def export_learning_docx(title: str, edition: dict, output_path: str,
             for column, (cell, value, width) in enumerate(zip(cells, values, widths)):
                 cell.width = width
                 cell.text = value
-                set_cell_margins(cell)
+                set_cell_margins(cell, top=15, bottom=15, start=45, end=45)
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 if item["number"] % 2 == 0:
                     set_cell_shading(cell, "F7F9F8")
@@ -432,9 +438,14 @@ def export_learning_docx(title: str, edition: dict, output_path: str,
                 para.paragraph_format.space_before = Pt(0)
                 para.paragraph_format.space_after = Pt(0)
                 para.paragraph_format.line_spacing = 1.0
+                para.paragraph_format.keep_with_next = False
+                para.paragraph_format.widow_control = False
+                grid = OxmlElement("w:snapToGrid")
+                grid.set(qn("w:val"), "0")
+                para._p.get_or_add_pPr().append(grid)
                 for run in para.runs:
                     run.font.name = "Aptos" if column == 1 else "Microsoft YaHei"
-                    run.font.size = Pt(8.5)
+                    run.font.size = Pt(8)
                     run.font.color.rgb = RGBColor(47, 55, 55)
         set_fixed_table_widths(index_table, widths)
         set_table_borders(index_table)
@@ -459,32 +470,53 @@ def export_learning_docx(title: str, edition: dict, output_path: str,
                 run.font.color.rgb = RGBColor(91, 107, 105)
 
     if include_vocabulary and vocabulary:
-        doc.add_heading("本章词汇", level=1)
-        table = doc.add_table(rows=1, cols=2)
+        heading = doc.add_heading("本章词汇", level=1)
+        heading.paragraph_format.space_before = Pt(6)
+        heading.paragraph_format.space_after = Pt(3)
+        for run in heading.runs:
+            run.font.size = Pt(11)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+        table = doc.add_table(rows=1, cols=4)
         table.autofit = False
-        table.columns[0].width = Inches(2.3)
-        table.columns[1].width = Inches(4.2)
+        widths = (Inches(1.35), Inches(2.08), Inches(1.35), Inches(2.08))
         headers = table.rows[0].cells
-        headers[0].text, headers[1].text = "Word", "中文释义"
+        for cell, label in zip(headers, ("Word", "中文释义", "Word", "中文释义")):
+            cell.text = label
         for cell in headers:
-            set_cell_shading(cell, "355E59")
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_shading(cell, "E5EEEA")
             for run in cell.paragraphs[0].runs:
                 run.font.bold = True
-                run.font.color.rgb = RGBColor(255, 255, 255)
-        for index, item in enumerate(vocabulary.values()):
+        repeat = OxmlElement("w:tblHeader")
+        repeat.set(qn("w:val"), "true")
+        table.rows[0]._tr.get_or_add_trPr().append(repeat)
+        items = list(vocabulary.values())
+        for index in range(0, len(items), 2):
             cells = table.add_row().cells
-            cells[0].text = str(item["word"] or "")
-            cells[1].text = str(item["meaning"] or "")
-            if index % 2:
+            for group, item in enumerate(items[index:index + 2]):
+                cells[group * 2].text = str(item["word"] or "")
+                cells[group * 2 + 1].text = str(item["meaning"] or "")
+            if (index // 2) % 2:
                 for cell in cells:
                     set_cell_shading(cell, "F1F5F3")
-            for cell in cells:
+        for row in table.rows:
+            for column, cell in enumerate(row.cells):
+                set_cell_margins(cell, top=15, bottom=15, start=45, end=45)
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 for para in cell.paragraphs:
-                    para.paragraph_format.space_after = Pt(3)
-                    para.paragraph_format.space_before = Pt(3)
-        table.style = "Table Grid"
+                    para.paragraph_format.space_after = Pt(0)
+                    para.paragraph_format.space_before = Pt(0)
+                    para.paragraph_format.line_spacing = 1.0
+                    para.paragraph_format.keep_with_next = False
+                    para.paragraph_format.widow_control = False
+                    grid = OxmlElement("w:snapToGrid")
+                    grid.set(qn("w:val"), "0")
+                    para._p.get_or_add_pPr().append(grid)
+                    for run in para.runs:
+                        run.font.name = "Aptos" if column % 2 == 0 else "Microsoft YaHei"
+                        run.font.size = Pt(8)
+                        run.font.color.rgb = RGBColor(47, 55, 55)
+        set_fixed_table_widths(table, widths)
+        set_table_borders(table)
 
     doc.save(str(path))
     return {"docx": str(path), "png": str(png_path) if png_path else None,

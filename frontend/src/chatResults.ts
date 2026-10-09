@@ -7,7 +7,7 @@ export function resultCard(data: Record<string, any>, savedPlan = false, selecte
   const completed = data.status === 'completed'
   const state = !completed ? ({ failed:'任务失败', cancelled:'任务已取消', interrupted:'服务中断' } as Record<string,string>)[data.status] || '任务未完成' : ['plan','plan_revision'].includes(tool)
     ? savedPlan ? '已保存分幕' : '候选分幕 · 尚未保存'
-    : tool === 'revise' ? '修订稿已生成 · 应用状态请在修订页核对'
+    : tool === 'revise' ? '修订稿已生成 · 可在对话中比较并应用'
     : tool === 'illustration' ? '插图已保存' : tool === 'generate' ? '正文已保存' : '审校结果已保存'
   const actions: { label: string; view: View; query?: Record<string, string> }[] = []
   if (completed && tool === 'revise') {

@@ -27,7 +27,7 @@ test('revision actions point to the specific generated version', () => {
   for (const action of card.actions.slice(0,3)) {
     assert.equal(new URL(resultLink('p',6,action),'http://local').searchParams.get('revision'),'j1')
   }
-  assert.match(card.state,/应用状态请在修订页核对/)
+  assert.match(card.state,/可在对话中比较并应用/)
 })
 test('review imports only actionable requirements and does not execute revision', () => {
   const data = { tool:'consistency',status:'completed',job_id:'j1',result:{} }
