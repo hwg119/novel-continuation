@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.config_manager import (APP_ROOT, get_embedding_config, get_llm_config,
                                  load_config, save_config)
@@ -69,6 +69,9 @@ class GenerateRequest(BaseModel):
 
 
 class ChapterRequest(BaseModel):
+    plan_baseline: dict = Field(default_factory=dict)
+    work_object: dict = Field(default_factory=dict)
+    revision_source: dict | None = None
     number: int
     model_name: str = ""
     requirements: str = ""
@@ -415,8 +418,8 @@ def register_features(app: FastAPI, workspace_root: str,
                          if key in ("background", "extra_requirements", "chapter_brief",
                                     "chapter_requirements", "beats_per_chapter")})
         if payload.requirements.strip():
-            settings['chapter_requirements'] = (str(settings.get('chapter_requirements') or '')
-                                                + '\n' + payload.requirements.strip()).strip()
+            settings['_planning_request'] = payload.requirements.strip()
+        settings['_planning_mode'] = 'rebuild'
         previous = _planning_context(path, project_settings, payload.number)
         from core.auto_wiki import wiki_context
         wiki = wiki_context(path, previous, before_chapter=payload.number)
@@ -490,6 +493,8 @@ def register_features(app: FastAPI, workspace_root: str,
         settings = load_project_settings(path)
         number = state["chapter_number"]
         plan = {key: state["settings"].get(key, "") for key in ("chapter_brief", "chapter_requirements")}
+        plan['planning_input_origin'] = {'kind':'task_request',
+            'request':str(state['settings'].get('_planning_request') or ''), 'source_job':job_id}
         plan.update({key: result[key] for key in ("chapter_title", "beats", "planning_review")})
         settings.setdefault("chapter_plans", {})[str(number)] = plan
         if int(settings.get("chapter_number") or 0) == number:
@@ -528,6 +533,11 @@ def register_features(app: FastAPI, workspace_root: str,
                                   payload.number, secrets=(model_cfg.get("api_key", ""),))
             update("正在使用规划 Skill 按问题修订", {"log_path": str(audit.path),
                    "model_name": model_cfg.get("model_name", "")})
+            if payload.plan_baseline:
+                audit.write('planning_baseline', **payload.plan_baseline)
+                update('修订基准：' + str(payload.plan_baseline.get('label', '')), payload.plan_baseline)
+            if payload.work_object:
+                audit.write('work_object_selected', **payload.work_object)
             return revise_chapter_plan(settings, ContinuationLLM(model_cfg), num_beats,
                                        payload.requirements, previous, wiki,
                                        progress=lambda message: update(message), audit=audit)
@@ -875,7 +885,13 @@ def register_features(app: FastAPI, workspace_root: str,
         source = chapter_body(payload.text or source_file, source_file.splitlines()[0])
         original_source = chapter_body(source_file, source_file.splitlines()[0])
         baseline_job = None
-        if not payload.text or source.strip() == original_source.strip():
+        if payload.revision_source is not None:
+            chosen = payload.revision_source
+            if (not isinstance(chosen.get('text'),str) or not chosen['text'].strip()
+                    or str(chosen.get('original_source') or '').strip() != original_source.strip()):
+                raise HTTPException(409, '选定候选对应的正文已变化，请重新核对工作对象')
+            source = chosen['text']
+        elif not payload.text or source.strip() == original_source.strip():
             from web.revision_baseline import latest_candidate
             baseline_job = latest_candidate(path, payload.number, original_source)
             if baseline_job:
@@ -899,8 +915,11 @@ def register_features(app: FastAPI, workspace_root: str,
             baseline = {"kind": "candidate" if baseline_job else "saved_or_editor",
                         "job_id": baseline_job['id'] if baseline_job else None,
                         "chars": len(source)}
+            if payload.work_object:
+                baseline = {**payload.work_object, 'chars':len(source)}
             audit.write("revision_baseline", **baseline)
-            update("修订基准：上一份候选稿" if baseline_job else "修订基准：正文或编辑内容", baseline)
+            update('修订基准：' + str(payload.work_object.get('title') or '') if payload.work_object
+                   else "修订基准：上一份候选稿" if baseline_job else "修订基准：正文或编辑内容", baseline)
             update("已启用 LangGraph 修订流程", {"workflow_thread": job_id,
                    "model_name": payload.model_name, "chapter_number": payload.number})
             return run_revision_workflow(path, job_id, ContinuationLLM(model_cfg), update, audit,
@@ -997,7 +1016,8 @@ def register_features(app: FastAPI, workspace_root: str,
                         text, settings, retrieved, model_cfg,
                         previous_context=previous_context, wiki_history=wiki,
                         progress=update, audit=audit, structured=True,
-                        project_dir=path, chapter_number=payload.number)
+                        project_dir=path, chapter_number=payload.number,
+                        previous_chapter_number=payload.number-1 if payload.number>1 else None)
             return {"chapter_number": payload.number, **result,
                     "log_path": str(audit.path),
                     "retrieved_chars": len(retrieved),
@@ -1389,6 +1409,10 @@ def register_features(app: FastAPI, workspace_root: str,
     from web.chat import register_chat
     def chat_request(data):
         return ChapterRequest(number=data['chapter'], model_name=data['model_name'],
+                              preview=data.get('plan_baseline_preview', {}) if data['tool'] == 'plan_revision' else {},
+                              plan_baseline=data.get('plan_baseline', {}),
+                              work_object=data.get('work_object', {}),
+                              revision_source=data.get('revision_source'),
                               requirements=data.get('requirements', ''))
     def chat_illustration(project,data):
         settings = settings_for_chapter(load_project_settings(project_path(project)),data['chapter'])

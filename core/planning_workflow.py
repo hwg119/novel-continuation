@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from core.observability import observe, trace_context
 
 
 def planning_fingerprint(project_dir, chapter_number):
@@ -42,6 +43,7 @@ def read_planning_checkpoint(project_dir, thread_id):
     return state
 
 
+@observe('planning.workflow')
 def run_planning_workflow(project_dir, thread_id, model, update, audit, initial=None):
     from langgraph.func import entrypoint, task
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -55,10 +57,12 @@ def run_planning_workflow(project_dir, thread_id, model, update, audit, initial=
     else:
         read_planning_checkpoint(project_dir, thread_id)
 
+    trace_parent = trace_context()
     def run_stage(name, function):
         executed = False
 
         @task(name=f"planning_{name}")
+        @observe(f'planning.{name}', parent=trace_parent)
         def execute():
             nonlocal executed
             executed = True

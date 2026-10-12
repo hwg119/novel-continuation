@@ -25,6 +25,9 @@ class ChatStore:
                 CREATE TABLE IF NOT EXISTS actions (
                     id TEXT PRIMARY KEY, session TEXT NOT NULL, data TEXT NOT NULL,
                     status TEXT NOT NULL, job TEXT);
+                CREATE TABLE IF NOT EXISTS work_focus (
+                    session TEXT NOT NULL, chapter INTEGER NOT NULL, kind TEXT NOT NULL,
+                    data TEXT NOT NULL, PRIMARY KEY(session, chapter, kind));
             ''')
             columns = {row['name'] for row in db.execute('PRAGMA table_info(sessions)')}
             for name in ('renamed', 'deleted'):
@@ -153,10 +156,29 @@ class ChatStore:
 
     def actions(self, session):
         with self.db() as db:
-            return [dict(row) for row in db.execute('SELECT * FROM actions WHERE session=?', (session,))]
+            return [dict(row) for row in db.execute('SELECT * FROM actions WHERE session=? ORDER BY rowid', (session,))]
 
     def action_status(self, session, ident, status, job=None):
         with self.db() as db:
             db.execute('UPDATE actions SET status=?,job=? WHERE id=? AND session=?',
                        (status, job, ident, session))
             self._event(db, session, 'action_status', {'action_id': ident, 'status': status, 'job_id': job})
+
+    def work_focus(self, session, chapter):
+        with self.db() as db:
+            return {row['kind']:json.loads(row['data']) for row in db.execute(
+                'SELECT kind,data FROM work_focus WHERE session=? AND chapter=?', (session, chapter))}
+
+    def set_work_focus(self, session, chapter, kind, data, expected_id=None):
+        data = {**data, 'focused_at':time.time()}
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if not db.execute('SELECT 1 FROM sessions WHERE id=? AND deleted=0',(session,)).fetchone():
+                raise ValueError('对话不存在')
+            current = db.execute('SELECT data FROM work_focus WHERE session=? AND chapter=? AND kind=?',
+                                 (session,chapter,kind)).fetchone()
+            if expected_id is not None and (json.loads(current[0]).get('id') if current else '') != expected_id:
+                return False
+            db.execute('INSERT OR REPLACE INTO work_focus VALUES(?,?,?,?)',
+                       (session,chapter,kind,json.dumps(data,ensure_ascii=False)))
+            return True

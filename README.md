@@ -25,6 +25,35 @@
 
 讨论故事时，助手可按需翻读章节正文、已保存摘要，搜索历史片段或查阅 Wiki，再结合证据回答。查阅有预算上限，来源与过程保存在会话日志中；读取资料不会自动修改正文或重新编纂 Wiki。
 
+对话助手可从专业技能目录按需加载规划、写作、审校和修订方法；分幕讨论与修订验收共用核心评价规则。技能加载名称、模式和版本写入日志，加载只读取规则，不启动创作任务或改写作品。
+
+对话输入优先提供当前工作稿、用户要求和相关正文，历史任务中的整份稿件只保留版本索引。旧助手意见不默认进入评估，需要承接此前建议时可按需查阅该轮对话；历史记录和作品版本仍完整保存在本地。
+
+对话上下文使用统一的“作品对象”层：分幕、正文候选、审校结果和当前插图都有类型、ID、内容指纹、状态与来源。模型可通过 `list_artifacts` / `read_artifact` 列出、分页读取对象，并结合对话选择目标；程序核验目标归属和类型，不用标题正则替代意图判断。同一会话、章节按对象类型记住当前工作版本，刷新或重启后仍可继续；分幕修订与正文修订共用目标选择和输入快照，候选不会因未保存而自动退回旧稿。正文应用仍核对保存稿，避免覆盖手动修改。
+
+作品对象层借鉴 [Open Canvas 的版本设计](https://github.com/langchain-ai/open-canvas/blob/main/packages/shared/src/types.ts)，复用本项目的 SQLite 会话与任务文件。Open Canvas 已归档，仅作为设计参考；对话调度正式使用 [Deep Agents](https://github.com/langchain-ai/deepagents)。审校、插图已接入对象查阅，业务执行仍沿用现有接口。
+
+#### Deep Agents 对话引擎
+
+默认使用 Deep Agents 的原生工具调用循环，负责判断下一步、按需查阅、选择作品对象和提出操作；生成任务、确认应用、文件保存及冲突保护仍由本项目执行。依赖已纳入根目录 `requirements.txt`，无需额外试验环境或启用开关。工作进程使用后端相同的 Python 环境，独立进程用于可靠停止本轮回复。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe web_main.py
+```
+
+需要 Python 3.11+。对话使用 Deep Agents 理解上下文并按需调用工具。当前支持 OpenAI 兼容及 DeepSeek 原生工具调用，沿用所选地址与密钥并统一规范 API 地址，DeepSeek 关闭思考；其他供应商特殊接口尚未适配时会明确提示。可通过 `NOVEL_DEEPAGENTS_PYTHON` 指定调试用解释器。
+
+引擎关闭子智能体与内置文件工具，只开放作品查阅、历史证据读取和操作提案，不开放主机命令或直接改写小说。每轮最多6次模型调用、6次资料查阅及32000字证据，过程实时显示在聊天日志中，最终回复当前按整条返回。对话模型负责理解上下文、承接建议并整理具体操作要求，执行与验收使用同一份要求，原始聊天保留作追溯而不覆盖要求。完整模型输入、返回、工具请求、结果和耗时保存在工程 `runs/plan_logs/deepagents_*.jsonl`，密钥脱敏，不启用外部 LangSmith 追踪。
+
+小样本评估（会调用所选模型，但只使用合成资料，不执行生成或保存小说）：
+
+```powershell
+python tools/deepagents/evaluate.py --live --model-config deepseek-flash
+```
+
+结果及完整日志保存在 `workspace/agent_trials/`；模型判断效果应与协议回归测试区分，不以框架接通代替质量验收。
+
 生成结果按类型显示操作卡片：分幕可预览并保存，正文可直接阅读，审校可导入修订要求，修订稿可查看、比较并进入应用流程。版本入口定位到对应任务，不自动应用候选稿。
 
 对话也可生成章节 SVG 插图，沿用工程画风和现有插图流程，在聊天中查看进度与图片。已有正文或分幕时提供快捷入口，保存后的插图用于正文展示与 Word 导出。
@@ -37,7 +66,7 @@
 
 ## 快速体验
 
-需要预先安装 Python 3.10+ 和 Node.js 20+。启动器会自动创建虚拟环境、安装缺失依赖、构建前端、检查端口并打开浏览器。
+需要预先安装 Python 3.11+ 和 Node.js 20+。启动器会自动创建虚拟环境、安装缺失依赖、构建前端、检查端口并打开浏览器。
 
 ### Windows
 
@@ -155,6 +184,35 @@ workspace/
 - **本地 BGE-M3 Embedding**：运行 `python tools/embedding/dl_bge_m3.py` 下载模型，再运行 `python tools/embedding/embedding_server.py`。向量配置可指向默认的 `http://127.0.0.1:11435`。没有模型时可用“离线哈希”验证流程，但检索质量较低。
 
 ## 验证
+
+### 可选模型追踪（Phoenix）
+
+默认关闭，不影响原有 `requirements.txt`。只想使用小说工作台，无需安装任何追踪依赖。
+
+Phoenix 查看服务与小说程序分开安装：
+
+```powershell
+python -m venv .venv-phoenix
+.\.venv-phoenix\Scripts\python.exe -m pip install -r tools/observability/requirements-phoenix.txt
+.\tools\observability\start-phoenix.ps1
+```
+
+服务页面为 `http://127.0.0.1:6006`，数据保存在 `workspace/phoenix`，启动脚本关闭平台遥测，HTTP 页面仅监听本机。Phoenix 另有默认的 gRPC 接收端口 4317（此版本监听所有地址）；本项目仅使用 HTTP 上报，不要将这两个端口开放到公网。
+
+在小说项目原有虚拟环境中，仅安装采集端可选依赖，然后在启动工作台的同一终端启用：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r tools/observability/requirements-tracing.txt
+$env:NOVEL_TRACE_ENABLED = '1'
+$env:NOVEL_TRACE_ENDPOINT = 'http://127.0.0.1:6006/v1/traces'
+.\.venv\Scripts\python.exe web_main.py
+```
+
+关闭方式：将 `NOVEL_TRACE_ENABLED` 设为 `0` 并重启工作台。依赖缺失时会警告并降级；上报在后台执行，失败不阻断生成，原有 JSONL 日志保留。
+
+当前追踪统一模型调用及分幕生成/修订，记录提示词、原始输出、调用参数、异常、工作流阶段和审计事件。启用后小说文本会发送到配置的追踪地址，请不要未经确认配置外部服务；密钥字段及模型配置中的密钥值会脱敏。每条输入/输出默认最多记录 200000 字符，超出时标注截断，可通过 `NOVEL_TRACE_MAX_CHARS` 调整；`NOVEL_TRACE_PROJECT` 可指定 Phoenix 中的项目名。
+
+### 常规验证
 
 ```powershell
 python -m pytest -q tests

@@ -123,12 +123,12 @@ def check_consistency(chapter_text: str, settings: dict, retrieved_context: str,
                       llm_config: dict, temperature: float = 0.3,
                       previous_context: str = "", wiki_history: str = "",
                       progress=None, audit=None, structured=False,
-                      project_dir=None, chapter_number=None):
+                      project_dir=None, chapter_number=None, previous_chapter_number=None):
     """保留旧调用入口，默认改为整体故事审校；细节实验不进入生产路径。"""
     from core.story_review import check_story
     output = check_story(chapter_text, settings, retrieved_context, llm_config,
                          previous_context, wiki_history, progress, audit,
-                         project_dir, chapter_number)
+                         project_dir, chapter_number, previous_chapter_number)
     return output if structured else output["report"]
 
 

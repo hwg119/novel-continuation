@@ -21,6 +21,8 @@ from collections.abc import Callable
 
 from core.project_manager import chapter_path, chapters_dir, list_chapter_files
 from core.utils import read_file
+from core.plan_inputs import planning_input_prompt, planning_inputs, current_creation_request
+from core.observability import observe
 
 
 # ----------------------------- LLM 调用 -----------------------------
@@ -34,6 +36,7 @@ class ContinuationLLM:
         self.is_ollama = self.fmt == "ollama"
         self.last_response_diagnostics = {}
 
+    @observe('llm.complete', kind='LLM')
     def complete(self, prompt: str, system: str = "",
                  temperature: float = None, num_predict: int = None,
                  disable_thinking: bool = False, thinking_effort: str = None,
@@ -415,8 +418,7 @@ def build_beat_prompt(beat: dict, all_beats: list, written_paras: list,
 {settings.get('chapter_title', '') or '(未填写)'}
 【本章目标】
 {settings.get('chapter_brief', '') or '(按分幕大纲推进)'}
-【本章专属要求】
-{settings.get('chapter_requirements', '') or '(无)'}
+{planning_input_prompt(settings)}
 {glossary_block}
 【上下文优先级】
 本章任务与专属要求 > 已写正文末尾与最近章节摘要 > Wiki 历史依据 > 母本相关片段。
@@ -1060,16 +1062,21 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
 def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
                          previous_context: str, wiki_history: str,
                          chapter_goal: str, audit=None, project_dir=None,
-                         chapter_number=None, progress=None) -> list[dict]:
+                         chapter_number=None, progress=None, creative_request='') -> list[dict]:
     """让独立审查轮只找问题，不让它一边批评一边重写。"""
     from core.plan_evidence import evidence_sources, verify_issue
     sources = evidence_sources(previous_context[:7500], wiki_history[:1800], draft)
+    if creative_request:
+        sources.append({'id':'U01','kind':'user_request','label':'本次创作目标（不是历史证据）',
+                        'text':creative_request})
     from core.agent_skill import skill_guidance
     guidance = skill_guidance("chapter-planning", "review", audit, "review")
     prompt = f"""{guidance}
 
 【本章目标】
 {chapter_goal or '承接上一章，自然推进情节'}
+【本次原始创作要求】
+{creative_request or '（无额外本次要求）'}
 【分类证据目录｜逐条引用对应来源编号】
 {json.dumps(sources, ensure_ascii=False)}
 本次审查恰好包含 {num_beats} 幕；只返回本步骤的 JSON 审查结果。"""
@@ -1082,11 +1089,11 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
             from core.planning_research import research_review
             data = research_review(llm, prompt, sources, project_dir, int(chapter_number),
                                    _first_json_object, audit=audit, progress=progress,
-                                   num_predict=max(1200, num_beats * 240))
+                                   num_predict=max(1600, num_beats * 300))
         else:
             raw = llm.complete(
                 prompt, system="你只负责审查章节规划并输出 JSON，不负责续写正文。",
-                temperature=0.1, num_predict=max(1200, num_beats * 240),
+                temperature=0.1, num_predict=max(1600, num_beats * 300),
                 disable_thinking=True)
             if audit:
                 audit.write("review_response",
@@ -1100,8 +1107,12 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
             return [{"severity": "low", "scope": "审查流程", "problem": "初审未完成：issues 不是数组",
                      "check_failed": True}]
         result = [item for item in issues if isinstance(item, dict) and item.get("problem")][:8]
+        from core.plan_review_check import goal_check_issues
+        result.extend(goal_check_issues(data, creative_request, sources))
         for item in result:
             verify_issue(item, sources)
+        for index, item in enumerate(result, 1):
+            item['issue_id'] = f'R{index:02}'
         # 未回答的疑问进入持久化提醒，但不参与自动修补。
         uncertainties = data.get("uncertainties")
         if isinstance(uncertainties, list):
@@ -1115,6 +1126,8 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
         if audit:
             audit.write("review_evidence_sources", sources=sources)
             audit.write("review_parsed", issues_count=len(result), issues=result)
+            audit.write('creative_goal_checks', stage='review',
+                        request=creative_request, checks=data.get('requirement_checks', []))
         return result
     except Exception as exc:
         # 审查轮失败不应抹掉一份结构有效的初稿。
@@ -1126,7 +1139,7 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
 
 def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
                              review_issues: list[dict], num_beats: int,
-                             previous_context: str, audit=None) -> dict:
+                             previous_context: str, audit=None, creative_request='') -> dict:
     """重写后只做验收，避免审查意见在改写过程中被解决一半或引入新问题。"""
     from core.agent_skill import skill_guidance
     guidance = skill_guidance("chapter-planning", "acceptance", audit, "acceptance")
@@ -1138,6 +1151,8 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
 {json.dumps(draft, ensure_ascii=False)}
 【初审意见】
 {json.dumps(review_issues, ensure_ascii=False)}
+【本次原始创作要求，须同时验收】
+{creative_request or '（无额外本次要求）'}
 【重写稿】
 {json.dumps(rewritten, ensure_ascii=False)}
 
@@ -1149,22 +1164,29 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
     try:
         raw = llm.complete(
             prompt, system="你只验收章节规划并输出 JSON，不重写正文或规划。",
-            temperature=0.1, num_predict=max(1200, num_beats * 220),
+            temperature=0.1, num_predict=max(1600, num_beats * 300),
             disable_thinking=True)
         if audit:
             audit.write("acceptance_response",
                         elapsed_ms=round((time.monotonic() - started) * 1000),
                         response_chars=len(raw or ""), raw_response=raw)
         data = _first_json_object(raw)
+        from core.plan_review_check import acceptance_coverage
+        coverage = acceptance_coverage(review_issues, data)
+        from core.plan_review_check import goal_check_issues
+        from core.plan_evidence import evidence_sources
+        goal_issues = goal_check_issues(data, creative_request, evidence_sources('', '', rewritten))
         if any(not isinstance(data.get(key), list) for key in
                ("unresolved", "new_issues", "editorial_notes")):
             raise ValueError("验收结果缺少完整问题数组")
         unresolved = [item for item in data["unresolved"] if isinstance(item, dict) and item.get("problem")]
+        unresolved.extend(goal_issues)
         new_issues = [item for item in data["new_issues"] if isinstance(item, dict) and item.get("problem")]
         notes = data["editorial_notes"]
         result = {"passed": not (unresolved or new_issues),
                   "unresolved": unresolved[:8], "new_issues": new_issues[:8],
-                  "editorial_notes": notes[:8]}
+                  "editorial_notes": notes[:8], "checked_issues": coverage,
+                  "requirement_checks": data.get('requirement_checks', [])}
         if audit:
             audit.write("acceptance_parsed", **result)
         return result
@@ -1175,11 +1197,14 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
                 "editorial_notes": [], "check_failed": str(exc)}
 
 
+@observe('planning.generate')
 def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                          previous_context: str = "", wiki_history: str = "",
                          progress: Callable[[str], None] | None = None,
                          audit=None, stage_runner=None, project_dir=None) -> dict:
     """为新章提出回目和分幕；只返回建议，不自动覆盖已保存计划。"""
+    settings = {**settings, '_planning_mode':'rebuild'}
+    creative_request = current_creation_request(settings)
     def run_stage(name, function, *args, **kwargs):
         if stage_runner:
             return stage_runner(name, lambda: function(*args, **kwargs))
@@ -1196,8 +1221,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {wiki_history[:2200] or '（未提供）'}
 【本章目标】
 {settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
-【本章专属要求】
-{settings.get('chapter_requirements', '') or '（无）'}
+{planning_input_prompt(settings)}
 只返回完整规划 JSON。"""
 
     if progress:
@@ -1213,6 +1237,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                     continuity_chars=len(previous_context), wiki_chars=len(wiki_history),
                     goal=str(settings.get('chapter_brief') or ''),
                     chapter_requirements=str(settings.get('chapter_requirements') or ''))
+        audit.write('planning_input_layers', **planning_inputs(settings))
     try:
         draft = run_stage("draft", _request_plan_json, llm, prompt, num_beats, temperature=0.4,
                                    audit=audit, stage="draft")
@@ -1224,7 +1249,8 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     review_issues = run_stage("review", _review_chapter_plan,
         llm, draft, num_beats, previous_context, wiki_history,
         str(settings.get('chapter_brief') or ''), audit=audit, project_dir=project_dir,
-        chapter_number=settings.get('chapter_number'), progress=progress)
+        chapter_number=settings.get('chapter_number'), progress=progress,
+        creative_request=creative_request)
     data = draft
     substantive_issues = [item for item in review_issues
                           if str(item.get("severity") or "low").lower() in ("high", "medium")
@@ -1299,7 +1325,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             progress("正在验收重写后的规划（第 4/4 阶段）")
         acceptance = run_stage("acceptance", _validate_rewritten_plan,
             llm, draft, data, [item for item in review_issues if item.get("evidence_verified")],
-            num_beats, previous_context, audit=audit)
+            num_beats, previous_context, audit=audit, creative_request=creative_request)
         acceptance_issues = list(acceptance.get("unresolved") or []) + list(
             acceptance.get("new_issues") or [])
         editorial_notes = list(acceptance.get("editorial_notes") or [])
@@ -1396,11 +1422,13 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                                 "editorial_notes": all_editorial_notes}}
 
 
+@observe('planning.revise')
 def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                         issues: str, previous_context: str = "",
                         wiki_history: str = "",
                         progress: Callable[[str], None] | None = None, audit=None) -> dict:
     """按用户指出的问题定向修订现有规划，不直接覆盖已保存计划。"""
+    settings = {**settings, '_planning_mode':'revision'}
     current_beats = settings.get("beats") or []
     if not current_beats:
         raise ValueError("当前章节还没有分幕规划，请先生成第一版规划。")
@@ -1419,7 +1447,7 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 
 这是一项定向修订，不是从零规划：保留未受影响的人物线、有效线索和故事基础。用户要求改善节奏、趣味或波折时，可以改变必要幕的实际事件、阻力、人物选择或结果，不能仅更换回目、幕名或形容词，也不能以保留原稿为由拒绝实质调整。若调整一幕影响后续幕，必须同步修正其时间、人物已知信息和结尾状态。仅要求改名称或文字时，不额外改变剧情。
 
-信息优先级：用户问题点 > 当前章专属要求 > 上一章正文结尾 > 有效摘要 > 最近 Wiki > 全书背景。
+用户问题点和当前章要求决定创作目标；上一章正文决定既有事实。讨论建议、旧规划或要求里的历史概括不能覆盖正文，除非用户明确要求改写历史。
 【用户指出的问题点】
 {issues[:5000]}
 【当前规划】
@@ -1434,16 +1462,15 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {wiki_history[:2200] or '（未提供）'}
 【本章目标】
 {settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
-【本章专属要求】
-{settings.get('chapter_requirements', '') or '（无）'}
+{planning_input_prompt(settings)}
 
 修订规则：
-1. 必须逐项解决用户指出的问题；问题之间冲突时，优先保证原文事实、时间线和人物信息权限。
+1. 按完整目标解决用户指出的问题，不把举例或备选拆成必须同时满足的指令；问题之间冲突时，优先保证原文事实、时间线和人物信息权限。
 2. 不得删除未被问题影响的重要情节，也不得借修订引入另一套无关剧情。
 3. 第一幕须与上一章保持可解释的时间线或事件连续性，允许自然切换人物线；通常聚焦一至两条主要人物线，必要时可增加视角。
-4. 每幕必须推进新事件并产生明确结束状态，不得用不同措辞重复同一功能。
+4. 各幕须有可解释的故事作用，不得用不同措辞重复同一功能。变化可以是信息、选择、关系或局面；允许有效静场，不强求每幕出现新事件或反转。
 5. 允许保留或调整原规划中的新增元素，通常聚焦一个，但不以数量限制合理创作；普通线索材料放入 new_facts 即可。
-6. 在内部逐项自检问题点，但不要输出分析、自检报告或修改说明，只输出修订后的完整规划。
+6. 自检完整目标和修改牵动的逻辑：人物信息与物件先取得后使用，推测不直接升级为事实，线索并置不等于因果确认。直接替换原有内容，同步相关幕和状态，不追加重复的新旧说明。desc 只写场景事件，不复制旧稿中已知信息、新增信息和结尾状态的附注；这些内容在对应结构字段更新。不要输出自检报告或修改说明。
 7. 动态上下文中已经完成的内容不得原样重演；章末状态是修订起点，若发生变化必须保留自然过程。若分幕记录与正文摘要冲突，以正文摘要和正文结尾为准。
 8. 根据上一章开头定位和结尾状态承接时间，次日不能沿用前一日日期；倒叙或并行场景须明确说明，无法确定日期时用相对时间。情绪未解决不等于既有信息尚未告知，不得把新态度写成首次获知。
 
@@ -1458,10 +1485,18 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     acceptance = None
     for attempt in range(2):
         data = None
+        repair_prompt = prompt
+        if attempt and candidate:
+            repair_current = {'title':candidate['chapter_title'], 'beats':candidate['beats']}
+            repair_prompt = prompt.replace(json.dumps(current, ensure_ascii=False),
+                                           json.dumps(repair_current, ensure_ascii=False), 1)
+            if audit:
+                audit.write('plan_repair_baseline', attempt=attempt+1,
+                            source='previous_candidate', candidate=repair_current)
         request = prompt if attempt == 0 else (
             "上次修订未落实要求或未通过结构检查：" +
             "；".join(parse_error or ["JSON 无效"]) +
-            "。请保持定向修订，修正后直接输出完整 JSON。\n\n" + prompt)
+            "。在下面最新候选上补修，保留已经落实的修改，不从最初稿重写。修正后直接输出完整 JSON。\n\n" + repair_prompt)
         if audit:
             audit.write("model_request", stage="user_plan_revision", attempt=attempt + 1, prompt=request)
         if progress:
@@ -1506,6 +1541,7 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         progress('分幕修订要求验收通过；候选已生成，保存后生效' if review.get('status')=='passed'
                  else '分幕候选已生成，但要求验收未通过或未完成，请核对后再保存')
     if audit:
+        audit.write('planning_input_layers', **planning_inputs({**settings, '_planning_request':issues}))
         audit.write('user_plan_revision_result',planning_review=review,
                     chapter_title=candidate['chapter_title'])
     return {**candidate,'planning_review':review,
@@ -1607,6 +1643,14 @@ def _format_planned_beat(item: dict) -> str:
         if value:
             meta.append(f"{label}：{value}")
     desc = str(item.get("desc") or "").strip()
+    # The model sometimes copies the rendered heading into desc while also
+    # returning its structured fields. Rendering must not add it a second time.
+    if meta:
+        canonical = re.sub(r'\s+', '', '｜'.join(meta))
+        while (heading := re.match(r'^【([^】]*)】\s*', desc)):
+            if re.sub(r'\s+', '', heading.group(1)) != canonical:
+                break
+            desc = desc[heading.end():].lstrip()
     known = item.get("known_before") if isinstance(item.get("known_before"), list) else []
     new_facts = item.get("new_facts") if isinstance(item.get("new_facts"), list) else []
     new_elements = item.get("new_elements") if isinstance(item.get("new_elements"), list) else []

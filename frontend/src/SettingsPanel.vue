@@ -284,10 +284,10 @@ onMounted(() => { void load() })
   <template v-else><section class="panel chapter-settings"><h2>第 {{ chapter }} 章规划</h2>
     <p v-if="planningReview" class="muted-note">规划检查：{{ reviewLabels[planningReview.status] || planningReview.status }}。编辑后请结合正文核对。</p>
     <div v-if="planningReview?.source === 'user_revision'" :class="['notice', { error: planningReview.status !== 'passed' }]" role="status">
-      <strong>{{ planningReview.status === 'passed' ? '修订要求验收通过' : planningReview.status === 'incomplete' ? '修订要求尚未完成验收' : '修订要求尚未落实' }}</strong>
-      <p>{{ planningReview.summary }}</p>
-      <p v-if="planningReview.changes">分幕内容变化：{{ planningReview.changes.content_changed_beats.length ? '第 ' + planningReview.changes.content_changed_beats.join('、') + ' 幕' : planningReview.requirement_scope === 'labels' ? '无（本次仅调整名称或表达）' : '无；仅改名不能落实情节类要求' }}。这是候选稿，保存后才生效。</p>
-      <p v-for="(note, index) in planningReview.unresolved || []" :key="index">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
+      <strong>{{ planningReview.status === 'passed' ? '修订要求验收通过' : planningReview.status === 'incomplete' ? '候选已生成，请人工核对' : '仍有修改要求未落实' }}</strong>
+      <p>{{ planningReview.status === 'incomplete' ? '自动验收未能确认结果，请核对修改是否落实后再保存。这不代表整份分幕都有问题。' : planningReview.summary }}</p>
+      <p v-if="planningReview.changes">文字有变化的分幕：{{ planningReview.changes.content_changed_beats.length ? '第 ' + planningReview.changes.content_changed_beats.join('、') + ' 幕' : '无' }}。仅为差异统计，不代表这些幕有问题。候选稿保存后才生效。</p>
+      <p v-for="(note, index) in planningReview.unresolved || []" :key="index">{{ note.scope }}：{{ String(note.problem || '').includes('验收引文不在当前候选稿') ? '部分验收引用与当前稿不一致，暂时无法确认修改是否落实。请人工核对，或重新验收。' : note.problem + ' ' + (note.suggestion || '') }}</p>
     </div>
     <details v-if="planningReview?.editorial_notes?.length"><summary>编辑提醒与修补记录（{{ planningReview.editorial_notes.length }} 项，仍需核对）</summary>
       <p v-for="(note, index) in planningReview.editorial_notes" :key="index" class="muted-note">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>

@@ -1,0 +1,2 @@
+# Install only into the independent .venv-phoenix environment.
+arize-phoenix==20.20.0

@@ -30,11 +30,14 @@ class PlanRunLogger:
                 return [redact(item) for item in value]
             return value
 
-        entry = {"timestamp": datetime.now(timezone.utc).isoformat(),
+        from core.observability import trace_identifiers
+        entry = {"timestamp": datetime.now(timezone.utc).isoformat(), **trace_identifiers(),
                  "event": event, **redact(fields)}
         with self._lock, self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
             stream.flush()
+        from core.observability import event as trace_event
+        trace_event(event, redact(fields))
 
 
 def read_plan_run_log(project_dir: str, job_id: str) -> list[dict]:

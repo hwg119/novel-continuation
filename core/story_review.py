@@ -1,5 +1,30 @@
 """整体故事审校：主线修订与可选增强分开保存，不强制细节纠错。"""
 import json
+import re
+import hashlib
+
+
+def story_sources(previous, wiki, chapter_number, previous_chapter_number=None):
+    """Split only application-owned wrappers, never headings inside fiction."""
+    sources = []
+    headings = list(re.finditer(r'(?m)^【(有效摘要|章末原文[^】]*)】\s*\n', previous))
+    blocks = [(m.group(1), previous[m.end():headings[i+1].start() if i+1<len(headings) else len(previous)].strip())
+              for i,m in enumerate(headings)] if headings else [('前章提供资料', previous)]
+    for label, text in blocks:
+        if not text:
+            continue
+        sources.append({'id':f'C{len(sources)+1:02}',
+            'kind':'summary' if label=='有效摘要' else 'body',
+            'label':'前章资料｜'+label, 'chapter':previous_chapter_number,
+            'chapter_relation':'previous_available_chapter',
+            'scope':'summary' if label=='有效摘要' else 'provided_excerpt',
+            'source_state':'compressed_reference' if label=='有效摘要' else 'saved_body_excerpt',
+            'text':text, 'hash':hashlib.sha256(text.encode()).hexdigest()})
+    if wiki:
+        from core.plan_evidence import evidence_sources
+        sources.extend({**row,'chapter':None,'scope':'provided_records',
+                        'source_state':'historical_reference'} for row in evidence_sources('',wiki,{}))
+    return sources
 
 
 def build_story_prompt(sources):
@@ -79,17 +104,20 @@ def assemble_story_result(data, sources, audit=None):
 
 
 def check_story(chapter_text, settings, retrieved_context, llm_config, previous_context="",
-                wiki_history="", progress=None, audit=None, project_dir=None, chapter_number=None):
+                wiki_history="", progress=None, audit=None, project_dir=None, chapter_number=None,
+                previous_chapter_number=None):
     from core.continuation import _first_json_object
     from core.consistency import ContinuationLLM
-    from core.plan_evidence import evidence_sources
     from core.planning_research import research_review
-    sources = evidence_sources(previous_context, wiki_history, {})
+    sources = story_sources(previous_context, wiki_history, chapter_number, previous_chapter_number)
     if retrieved_context:
         sources.append({"id": "R01", "kind": "retrieval", "label": "补充检索，历史时段需核对", "text": retrieved_context})
     if settings.get("background"):
         sources.append({"id": "B01", "kind": "background", "label": "作者背景，不冻结后续状态", "text": settings["background"]})
-    sources.append({"id": "T01", "kind": "current_body", "label": "本章完整正文", "text": chapter_text})
+    sources.append({"id": "T01", "kind": "current_body", "label": "本章完整正文",
+                    'chapter':chapter_number, 'scope':'full_body', 'offset':0,
+                    'total_chars':len(chapter_text),'source_state':'body_under_review',
+                    'hash':hashlib.sha256(chapter_text.encode()).hexdigest(), "text": chapter_text})
     prompt = build_story_prompt(sources)
     if progress:
         progress("正在使用故事审校 Skill 整体阅读，评估主线与情节增强")

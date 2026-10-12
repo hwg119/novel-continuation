@@ -30,11 +30,11 @@ open_browser() {
 cd "$APP_ROOT"
 printf '\033[32m小说续写工作台 · macOS 启动器\033[0m\n'
 
-command -v python3 >/dev/null 2>&1 || fail "未找到 Python 3。请先安装 Python 3.10 或更高版本。"
+command -v python3 >/dev/null 2>&1 || fail "未找到 Python 3。请先安装 Python 3.11 或更高版本。"
 PYTHON_COMMAND="$(command -v python3)"
 PYTHON_VERSION="$($PYTHON_COMMAND -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 PYTHON_MINOR="$($PYTHON_COMMAND -c 'import sys; print(sys.version_info.minor)')"
-[[ "$($PYTHON_COMMAND -c 'import sys; print(int(sys.version_info >= (3,10)))')" == "1" ]] || fail "当前 Python 为 $PYTHON_VERSION，需要 Python 3.10 或更高版本。"
+[[ "$($PYTHON_COMMAND -c 'import sys; print(int(sys.version_info >= (3,11)))')" == "1" ]] || fail "当前 Python 为 $PYTHON_VERSION，需要 Python 3.11 或更高版本。"
 
 command -v node >/dev/null 2>&1 || fail "未找到 Node.js。请先安装 Node.js 20 或更高版本。"
 command -v npm >/dev/null 2>&1 || fail "未找到 npm，请重新安装 Node.js。"

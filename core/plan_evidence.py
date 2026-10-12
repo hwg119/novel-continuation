@@ -67,6 +67,8 @@ def verify_issue(item, sources):
     has_plan = any(row["source_kind"] == "plan" for row in located)
     has_comparison = (any(row["source_kind"] in {"body", "summary", "wiki", "context"}
                           for row in located)
+                      or (item.get('category') == 'goal' and
+                          any(row['source_kind']=='user_request' for row in located))
                       or len({(row["source_id"], normalized(row["quote"])) for row in located
                               if row["source_kind"] == "plan"}) >= 2)
     # 无效的附加引文不应否定已定位的充分证据。低风险文字修补允许单点依据。

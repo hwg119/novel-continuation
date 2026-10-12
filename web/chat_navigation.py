@@ -34,6 +34,18 @@ def navigation_links(ids, chapter=None):
 
 def reply_navigation_context(links):
     """Expose rendered links, not the full capability catalogue, to reply generation."""
-    return '\n【本次实际提供的跳转按钮】\n' + json.dumps(links, ensure_ascii=False) + (
+    buttons = []
+    inline_plan = False
+    for link in links:
+        if link.get('view') == 'settings' and type(link.get('chapter')) is int:
+            inline_plan = True
+            buttons.append({'label':'在对话中生成／修改分幕', 'chapter':link['chapter'], 'action':'plan_reply'})
+            buttons.append({**link, 'label':'打开续写设定（可选）'})
+        else:
+            buttons.append(link)
+    instruction = ('涉及落实本条分幕建议时，优先说点击“在对话中生成／修改分幕”，结果在聊天中展示，用户确认后保存。'
+                   '“打开续写设定（可选）”仅供想手动编辑的用户选择，不要把跳转描述为必经步骤。'
+                   '根据上下文判断大纲是否存在，不声称尚无分幕的章节已有大纲。\n') if inline_plan else ''
+    return '\n【本次实际提供的跳转按钮】\n' + json.dumps(buttons, ensure_ascii=False) + (
         '\n仅可指引用户点击此清单内的按钮，名称必须一致。功能目录和处理提示不是按钮清单。'
-        '清单为空时禁止说“点击下方按钮”，改为说明左侧导航入口。\n')
+        '清单为空时禁止说“点击下方按钮”，改为说明左侧导航入口。\n') + instruction

@@ -19,6 +19,8 @@ class WorkbenchServer(uvicorn.Server):
     async def shutdown(self, sockets=None):
         self.shutdown_requested.set()
         await super().shutdown(sockets=sockets)
+        from core.observability import flush
+        flush(timeout_ms=500)
 
 
 def main():

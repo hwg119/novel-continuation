@@ -118,6 +118,18 @@ function revisionSaved(result: { vector_job_id?: string | null }) {
 }
 const enhancementChoices = ref<Record<string, string[]>>({})
 const revisingAudit = ref('')
+const revisingReply = ref(0)
+async function revisePlanReply(event: Event) {
+  if (revisingReply.value || busy.value || running.value) return
+  if (!props.modelName) { toast.error('请先选择大模型'); return }
+  revisingReply.value = event.id
+  try {
+    const job = await api<{ id: string }>(`/api/projects/${props.projectId}/chat/${selected.value}/revise-plan-from-reply`,
+      writeOptions('POST', { event_id: event.id, model_name: props.modelName }))
+    emit('task', job.id)
+  } catch (error) { toast.error(error) }
+  finally { revisingReply.value = 0 }
+}
 const auditingChapter = ref('')
 async function auditChapter(event: Event) {
   if (auditingChapter.value) return
@@ -321,7 +333,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
             <details v-if="event.data.result?.candidate" class="chat-content-preview"><summary>预览修订正文 · {{ event.data.result.candidate.length }} 字符</summary><div class="chat-result-prose chat-draft-prose">{{ event.data.result.candidate }}</div><p class="chat-preview-note">这是候选稿，不代表已应用；请比较差异后决定。</p></details>
             <div v-if="event.data.status === 'completed' && (event.data.tool === 'generate' || (event.data.tool === 'revise' && revisionApplied(event.data.job_id)))" class="chat-inline-followup"><button type="button" class="chat-button" :disabled="!!auditingChapter" :title="`使用当前模型：${modelName}`" @click="auditChapter(event)">{{ auditingChapter === event.data.job_id ? '正在启动审校…' : '在对话中审校' }}</button><small>审校、修订、比较与应用保存均可在此完成；下方功能页入口为可选。</small></div>
             <div class="chat-result-actions"><button v-if="event.data.status === 'completed' && event.data.result?.beats?.length" type="button" class="chat-button" :disabled="planSaved(event.data.action_id) || saving === event.data.action_id" @click="savePlan(event)">{{ planSaved(event.data.action_id) ? '已保存分幕' : saving === event.data.action_id ? '保存中…' : '保存分幕' }}</button><button v-if="resultCard(event.data).tool === 'consistency'" type="button" class="chat-button" :disabled="!auditCanRevise(event.data) || !!revisingAudit" :title="`使用当前模型：${modelName}`" @click="reviseAudit(event)">{{ revisingAudit === event.data.job_id ? '正在启动修订…' : '导入要求并修订' }}</button><a v-for="action in resultCard(event.data, planSaved(event.data.action_id), enhancementChoices[event.data.job_id] || []).actions.filter(action => action.label !== '导入要求并修订')" :key="action.label" class="chat-feature-link" :href="resultLink(projectId, event.data.chapter, action)" @click="resultActionClick($event, event, action.label)">{{ action.label }} →</a></div></template>
-          <template v-else-if="event.kind === 'link'"><a class="chat-feature-link" :href="link(event.data)">{{ event.data.label }} →</a></template>
+          <template v-else-if="event.kind === 'link'"><div v-if="event.data.view === 'settings' && event.data.chapter && event.data.turn_id" class="chat-result-actions"><button type="button" class="chat-button" :disabled="!!revisingReply || busy || !!running" :title="`使用当前模型：${modelName}`" @click="revisePlanReply(event)">{{ revisingReply === event.id ? '正在启动…' : '在对话中生成／修改分幕' }}</button><a class="chat-feature-link" :href="link(event.data)">打开续写设定（可选） →</a></div><a v-else class="chat-feature-link" :href="link(event.data)">{{ event.data.label }} →</a></template>
           <template v-else><p>{{ event.kind === 'user' ? (event.data.text || event.data.message) : chatReplyText(event.data.text || event.data.message || '') }}</p></template>
         </article>
       </div>
@@ -376,7 +388,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-entry.progress,.chat-entry.task_progress{font-size:14px;color:#698585;padding:2px 0}
 .chat-entry.action,.chat-entry.task_result{border:1px solid #bed4ca;border-left:4px solid #397b69;padding:20px;border-radius:6px}.chat-entry.action button{margin-top:14px}
 .chat-entry.failed,.chat-entry.interrupted{color:#a74026;background:#fff1e9;padding:14px}
-.chat-entry.process{padding:0;white-space:normal}.chat-process{border:1px solid #bacdc8;border-radius:7px;background:#edf3f1;color:#4f7068}.chat-process summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:11px 14px;cursor:pointer;list-style:none;font-size:12px}.chat-process summary::before{content:'▸'}.chat-process[open] summary::before{content:'▾'}.chat-process-title{font-weight:700}.chat-process summary small{margin-left:auto}.chat-process-latest{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:18px;opacity:.85}.chat-process.failed,.chat-process.interrupted{border-color:#d4a68c}.chat-process.running .chat-process-title{color:#2c7760}.chat-process-log{max-height:260px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;background:#19343a;color:#c5d8d2;padding:12px 14px;border-radius:0 0 6px 6px;font:12px/1.8 Consolas,'Microsoft YaHei',monospace}.chat-process-line{display:grid;grid-template-columns:64px 34px minmax(0,1fr);gap:8px;margin-bottom:9px}.chat-process-line time{color:#8ca9a5}.chat-process-line>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-process-line small{display:block;color:#91afa5}.chat-process-line.error{color:#efb39c}.chat-process-line.success{color:#97d5ae}
+.chat-entry.process{padding:0;white-space:normal}.chat-process{border:1px solid #bacdc8;border-radius:7px;background:#edf3f1;color:#4f7068}.chat-process summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:11px 14px;cursor:pointer;list-style:none;font-size:12px}.chat-process summary::before{content:'▸'}.chat-process[open] summary::before{content:'▾'}.chat-process-title{font-weight:700}.chat-process summary small{margin-left:auto}.chat-process-latest{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:18px;opacity:.85}.chat-process.failed,.chat-process.interrupted{border-color:#d4a68c}.chat-process.running .chat-process-title{color:#2c7760}.chat-process-log{max-height:260px;overflow-y:auto;overscroll-behavior-y:auto;scrollbar-width:thin;background:#19343a;color:#c5d8d2;padding:12px 14px;border-radius:0 0 6px 6px;font:12px/1.8 Consolas,'Microsoft YaHei',monospace}.chat-process-line{display:grid;grid-template-columns:64px 34px minmax(0,1fr);gap:8px;margin-bottom:9px}.chat-process-line time{color:#8ca9a5}.chat-process-line>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-process-line small{display:block;color:#91afa5}.chat-process-line.error{color:#efb39c}.chat-process-line.success{color:#97d5ae}
 .chat-composer{position:static;flex-shrink:0;min-width:0;margin-top:12px;border-radius:10px;box-shadow:0 4px 15px #193a3310;--el-color-primary:#397b69;--el-border-color:#b8d2c7;--el-text-color-regular:#263a40;--el-text-color-primary:#263a40;--el-text-color-placeholder:#698585;--el-bg-color:#fff;--el-fill-color-blank:#fff;--chat-primary:#397b69;--chat-text:#263a40;--chat-input-shadow-color:#397b6933}
 .chat-key-hint{font-size:12px;color:#698585}.chat-composer-note{font-size:12px;color:#698585;padding:8px 16px}
 .chat-composer :deep(.elx-x-sender__action-list){gap:10px}.chat-composer :deep(.chat-rich-text){font:inherit;line-height:1.8}

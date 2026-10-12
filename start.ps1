@@ -86,9 +86,9 @@ if (-not $PythonCommand -and (Test-Path $VenvPython)) {
         $PythonCommand = $VenvPython
     }
 }
-if (-not $PythonCommand) { Stop-WithMessage "Python 3 was not found. Install Python 3.10 or newer and enable Add Python to PATH." }
+if (-not $PythonCommand) { Stop-WithMessage "Python 3 was not found. Install Python 3.11 or newer and enable Add Python to PATH." }
 $PythonVersion = Get-CommandVersion $PythonCommand ($PythonArguments + @("--version"))
-if ($null -eq $PythonVersion -or $PythonVersion -lt [version]"3.10") { Stop-WithMessage "Python 3.10 or newer is required." }
+if ($null -eq $PythonVersion -or $PythonVersion -lt [version]"3.11") { Stop-WithMessage "Python 3.11 or newer is required." }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Stop-WithMessage "Node.js was not found. Install Node.js 20 or newer." }
 $NodeVersion = Get-CommandVersion "node" @("--version")

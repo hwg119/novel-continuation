@@ -19,10 +19,14 @@ def load_agent_skill(name, reference=None):
     content = path.read_bytes()
     if reference is not None:
         references = {"chapter-revision": {"local", "whole", "acceptance"},
-                      "chapter-planning": {"draft", "review", "repair", "acceptance", "user-acceptance"},
+                      "chapter-planning": {"draft", "review", "repair", "acceptance", "user-acceptance", "discussion"},
                       "prose-polish": {"acceptance"}}
         if reference not in references.get(name, set()):
             raise ValueError("不支持的 Skill 参考")
+        if name=='chapter-planning' and reference in ('review','user-acceptance','discussion'):
+            method_path=root/'references'/'evaluation.md'
+            body+='\n\n'+method_path.read_text(encoding='utf-8').strip()
+            content+=method_path.read_bytes()
         reference_path = root / "references" / f"{reference}.md"
         body += "\n\n" + reference_path.read_text(encoding="utf-8").strip()
         content += reference_path.read_bytes()
