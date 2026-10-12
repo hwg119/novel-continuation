@@ -19,6 +19,8 @@ DEFAULT_EMBEDDING_CONFIG_NAME = "本地bge"
 
 DEFAULT_CONFIG = {
     "workspace_root": "",
+    # 面向普通创作使用时保持隐藏；开发者可在本机 config.json 中显式开启。
+    "developer_map_enabled": False,
     "default_llm_config_name": DEFAULT_LLM_CONFIG_NAME,
     "last_llm_config_name": DEFAULT_LLM_CONFIG_NAME,
     "last_embedding_config_name": DEFAULT_EMBEDDING_CONFIG_NAME,

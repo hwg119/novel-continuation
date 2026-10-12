@@ -5,6 +5,7 @@ import ProjectsPanel from './ProjectsPanel.vue'
 import SettingsPanel from './SettingsPanel.vue'
 import QualityPanel from './QualityPanel.vue'
 import RunsPanel from './RunsPanel.vue'
+const DeveloperPanel = defineAsyncComponent(() => import('./DeveloperPanel.vue'))
 import ConfigPanel from './ConfigPanel.vue'
 import WikiPanel from './WikiPanel.vue'
 import RelationGraphPanel from './RelationGraphPanel.vue'
@@ -37,7 +38,7 @@ type ChapterSummary = { number: number; text: string; exists: boolean; valid: bo
 type ChapterIllustration = { exists: boolean; svg: string; png?: string }
 type ChapterSearchResult = { chapter: number; segment: number; text: string; relevance: number;
   semantic_score: number | null; matched_terms: string[]; constraint_mode: string }
-type Tab = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config'
+type Tab = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config' | 'developer'
 type GenerationRequest = { number: number; title: string; beatsLimit: number | null }
 type PendingGeneration = { request: GenerationRequest; overwrite: boolean; modelName: string }
 type NavItem = { id: Tab; label: string; icon: string }
@@ -59,11 +60,13 @@ const navGroups: { label: string; items: NavItem[] }[] = [
   { label: '管理', items: [
     { id: 'projects', label: '工程与母本', icon: 'M3.5 6.5h6l2 2h9v10h-17z' },
     { id: 'runs', label: '运行记录', icon: 'M12 4a8 8 0 1 0 8 8M12 7v5l3 2M17 4h3v3' },
+    { id: 'developer', label: '开发者地图', icon: 'M4 4h6v6H4zM14 14h6v6h-6zM10 7h7v7M7 10v7h7' },
   ] },
 ]
 const configNav: NavItem = { id: 'config', label: '全局配置', icon: 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM19 12l2-1-2-3-2 .5-1-2.5h-4L10 6.5 8 6l-2 3-3 .5v4L6 15l1 3 3-.5 2 2.5h3l1-2.5 3 .5 2-3z' }
 const activeTab = ref<Tab>('home')
 const projects = ref<Project[]>([])
+const developerMapEnabled = ref(false)
 const chapters = ref<Chapter[]>([])
 const selectedExportChapters = ref<number[]>([])
 const exportingChapters = ref(false)
@@ -276,9 +279,10 @@ async function switchProject(event: Event) {
   window.location.assign(routePath('home', next, null))
 }
 async function loadConfig() {
-  try { const config = await api<{ llm_configs: Record<string, unknown>; default_llm_config_name: string; last_llm_config_name: string }>('/api/config')
+  try { const config = await api<{ llm_configs: Record<string, unknown>; default_llm_config_name: string; last_llm_config_name: string; developer_map_enabled?: boolean }>('/api/config')
     models.value = Object.keys(config.llm_configs || {})
-    modelName.value = config.default_llm_config_name || config.last_llm_config_name || models.value[0] || '' }
+    modelName.value = config.default_llm_config_name || config.last_llm_config_name || models.value[0] || ''
+    developerMapEnabled.value = config.developer_map_enabled === true }
   catch (cause) { error.value = String(cause) }
 }
 async function loadChapters(selectLast = false) {
@@ -443,6 +447,7 @@ async function exportSelectedChapters() {
 }
 function openSettings(number: number) { settingsChapter.value = number; activeTab.value = 'settings' }
 function switchTab(tab: Tab) {
+  if (tab === 'developer' && !developerMapEnabled.value) return
   leaveBookMode()
   if (tab === 'settings') settingsChapter.value = null
   activeTab.value = tab
@@ -482,8 +487,8 @@ async function restoreRoute() {
         chapters.value.some(item => item.number === requested.chapterNumber))
       await chooseChapter(requested.chapterNumber)
     settingsChapter.value = requested.view === 'settings' ? requested.chapterNumber : null
-    activeTab.value = requested.view === 'config' || !requested.projectId || validProject
-      ? requested.view : 'home'
+    activeTab.value = requested.view === 'developer' && !developerMapEnabled.value ? 'home' :
+      (requested.view === 'config' || !requested.projectId || validProject ? requested.view : 'home')
   } finally {
     restoringRoute = false
     await nextTick()
@@ -495,17 +500,18 @@ async function restoreRoute() {
 async function initialize() {
   const requested = parseRoute(window.location.pathname)
   await loadProjects(requested?.projectId || undefined)
+  await loadConfig()
   if (requested?.chapterNumber && requested.projectId === projectId.value &&
       chapters.value.some(item => item.number === requested.chapterNumber))
     await chooseChapter(requested.chapterNumber)
   settingsChapter.value = requested?.view === 'settings' ? requested.chapterNumber : null
   activeTab.value = requested && (requested.view === 'config' ||
-    requested.projectId === projectId.value) ? requested.view : 'home'
+    (requested.view === 'developer' ? developerMapEnabled.value : requested.projectId === projectId.value))
+    ? requested.view : 'home'
   await nextTick()
   routeReady.value = true
   const canonical = currentRoutePath()
   if (window.location.pathname !== canonical) window.history.replaceState({}, '', canonical)
-  void loadConfig()
 }
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && bookMode.value) { leaveBookMode(); return }
@@ -536,11 +542,11 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <div class="workbench-divider"><span>功能工作台</span><small>查看 · 管理 · 编辑</small></div>
   <nav class="primary-nav" aria-label="功能工作台">
     <section v-for="group in navGroups" :key="group.label" class="nav-group"><span class="nav-group-label">{{ group.label }}</span>
-      <button v-for="item in group.items" :key="item.id" :class="{ active: activeTab === item.id }" @click="switchTab(item.id)">
+      <template v-for="item in group.items" :key="item.id"><button v-if="item.id !== 'developer' || developerMapEnabled" :class="{ active: activeTab === item.id }" @click="switchTab(item.id)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="item.icon" /></svg><span>{{ item.label }}</span>
         <b v-if="item.id === 'wiki' && wikiPendingCount" class="nav-count" :aria-label="`${wikiPendingCount} 章 Wiki 待更新`">{{ wikiPendingCount }}</b>
         <i v-if="item.id === 'runs' && generating" class="nav-running" aria-label="任务运行中"></i>
-      </button></section>
+      </button></template></section>
   </nav>
   <div class="sidebar-bottom"><button class="config-nav" :class="{ active: activeTab === configNav.id }" @click="switchTab(configNav.id)">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="configNav.icon" /></svg><span>{{ configNav.label }}</span></button>
@@ -620,6 +626,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <WikiPanel v-else-if="activeTab === 'wiki'" :project-id="projectId" :model-name="modelName" :models="models" :current-chapter="chapterNumber" :focus-subject="wikiFocusSubject" @task="taskStarted" @open-chapter="openWikiChapter" @open-graph="activeTab = 'relationships'" @updated="wikiPendingCount = $event" />
   <RelationGraphPanel v-else-if="activeTab === 'relationships'" :project-id="projectId" :current-chapter="chapterNumber" @back="activeTab = 'wiki'" @open-chapter="openWikiChapter" @open-subject="wikiFocusSubject = $event; activeTab = 'wiki'" />
   <RunsPanel v-else-if="activeTab === 'runs'" :project-id="projectId" :focus-job="focusJob" />
+  <DeveloperPanel v-else-if="activeTab === 'developer'" :project-id="projectId" />
   <ConfigPanel v-else :key="activeTab" @changed="loadConfig" />
   <TaskDrawer v-if="!bookMode && activeTab !== 'chat'" :project-id="projectId" :focus-job="focusJob" @view="activeTab = 'runs'" @layout="consoleLayout = $event" />
   <ConfirmDialog dialog-id="generation-confirm" :open="Boolean(pendingGeneration)"

@@ -210,7 +210,7 @@ def register_features(app: FastAPI, workspace_root: str,
                 value["api_key"] = ""
         return {key: config.get(key) for key in (
             "llm_configs", "embedding_configs", "default_llm_config_name", "last_llm_config_name",
-            "last_embedding_config_name", "workspace_root", "proxy_setting")}
+            "last_embedding_config_name", "workspace_root", "proxy_setting", "developer_map_enabled")}
 
     @app.put("/api/config/misc", dependencies=[Depends(_write_required)])
     def save_misc(payload: MiscConfig):

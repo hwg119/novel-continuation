@@ -12,6 +12,7 @@ test('each workbench page has a stable project route', () => {
     ['quality', '/projects/abc/chapters/200/quality'],
     ['wiki', '/projects/abc/wiki'],
     ['runs', '/projects/abc/runs'],
+    ['developer', '/projects/abc/developer'],
   ]
   for (const [view, path] of cases) {
     assert.equal(routePath(view, 'abc', 200), path)

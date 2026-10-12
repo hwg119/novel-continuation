@@ -277,6 +277,11 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
     register_features(app, workspace_root, project_path, existing_chapter,
                       jobs, config_file)
 
+    # 开发者地图会显示运行轨迹及提示词片段，默认不注册；仅本机配置显式开启后随服务启动。
+    if bool(load_config(config_path).get("developer_map_enabled")):
+        from web.developer import register_developer
+        register_developer(app, project_path, config_path)
+
     if frontend_dist and Path(frontend_dist, "index.html").is_file():
         dist = Path(frontend_dist).resolve()
 
