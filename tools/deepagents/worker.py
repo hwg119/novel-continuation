@@ -8,6 +8,20 @@ from typing import Literal
 RPC_LOCK=threading.Lock()
 
 
+def friendly_model_error(exc):
+    """Keep provider details, but explain tool-call capability failures plainly."""
+    message=str(exc or '').strip()
+    lowered=message.lower()
+    tool_markers=('tool calling','tool_call','tool call','tools are not supported',
+                  'does not support tools','does not support tool','unsupported tools',
+                  'function calling','function_call')
+    if any(marker in lowered for marker in tool_markers):
+        return ('当前模型或接口未能完成工具调用。对话创作需要模型支持 OpenAI 兼容的 '
+                'tools/tool_calls；普通问答可能可用，但分幕、审校和修改等操作无法执行。'
+                f' 服务返回：{message}')
+    return message or '模型调用失败'
+
+
 def send(value):
     print(json.dumps(value,ensure_ascii=False,default=str),flush=True)
 
@@ -93,14 +107,16 @@ def run(request, model=None, call=None):
     cfg=request['config']
     if model is None:
         fmt=str(cfg.get('interface_format') or '').lower()
-        if fmt not in ('openai','deepseek'):
-            raise ValueError('当前对话引擎需要支持原生工具调用的 OpenAI 兼容或 DeepSeek 配置')
         extra={}
         name=str(cfg.get('model_name') or '').lower()
         if fmt=='deepseek' or name=='deepseek-flash': extra={'thinking':{'type':'disabled'}}
         sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
         from llm_adapters import check_base_url
-        model=ChatOpenAI(model=cfg['model_name'],api_key=cfg.get('api_key'),base_url=check_base_url(cfg.get('base_url') or '') or None,
+        # Do not infer capability from a provider label. Ollama and other local
+        # servers can expose a valid OpenAI-compatible tools endpoint; let the
+        # actual request establish support and report the provider error if not.
+        api_key=cfg.get('api_key') or ('ollama' if fmt=='ollama' else None)
+        model=ChatOpenAI(model=cfg['model_name'],api_key=api_key,base_url=check_base_url(cfg.get('base_url') or '') or None,
             temperature=0.1,max_tokens=1600,timeout=min(int(cfg.get('timeout') or 180),180),
             max_retries=0,extra_body=extra or None,use_responses_api=False,
             stream_usage=False)
@@ -119,8 +135,11 @@ def run(request, model=None, call=None):
     logger.raise_error=True
     agent=build_agent(model,request['system_prompt'],call or rpc)
     invocation={'recursion_limit':16,'callbacks':[logger]}
-    result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
-        '\n【本次用户消息】\n'+request['text']}]},config=invocation)
+    try:
+        result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
+            '\n【本次用户消息】\n'+request['text']}]},config=invocation)
+    except Exception as exc:
+        raise ValueError(friendly_model_error(exc)) from exc
     message=result['messages'][-1]
     from tools.deepagents.reply_display import public_reply
     from tools.deepagents.reply_contract import unfulfilled_action_promise
@@ -128,10 +147,13 @@ def run(request, model=None, call=None):
     if unfulfilled_action_promise(reply):
         # Give the model one chance to honor the operation contract. This keeps
         # intent resolution with the model instead of hard-coding chapter rules.
-        result=agent.invoke({'messages':result['messages']+[{'role':'user','content':
-            '系统校验：上一条最终答复承诺即将执行操作，但没有调用 propose_action。'
-            '请根据本次用户要求现在调用该工具；若不能执行，请明确说明缺少什么，不要让用户等待。'}]},
-            config=invocation)
+        try:
+            result=agent.invoke({'messages':result['messages']+[{'role':'user','content':
+                '系统校验：上一条最终答复承诺即将执行操作，但没有调用 propose_action。'
+                '请根据本次用户要求现在调用该工具；若不能执行，请明确说明缺少什么，不要让用户等待。'}]},
+                config=invocation)
+        except Exception as exc:
+            raise ValueError(friendly_model_error(exc)) from exc
         message=result['messages'][-1]
         reply=public_reply(message.content)
     if not reply:

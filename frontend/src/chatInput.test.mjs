@@ -9,7 +9,7 @@ test('Enter is not intercepted outside composition', () => {
 
 test('new conversation and send use explicit chat button styles', () => {
   const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
-  assert.match(component, /class="chat-button chat-button-secondary" @click="create"/)
+  assert.match(component, /class="chat-button chat-button-secondary chat-new-session" @click="create"/)
   assert.match(component, /class="chat-button chat-send-button"/)
   assert.match(component, /\.chat-button:disabled/)
   assert.match(component, /\.chat-button:focus-visible/)
@@ -19,8 +19,8 @@ test('task actions and chapter selector share the workbench styling', () => {
   const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
   assert.match(component, /class="chat-button"[^>]*@click="confirm\(event\)"/)
   assert.match(component, /class="chat-button"[^>]*@click="savePlan\(event\)"/)
-  assert.match(component, /\.chat-context input\{[^}]*border-radius:6px/)
-  assert.match(component, /\.chat-context input:focus\{/)
+  assert.match(component, /\.chat-context input,\.chat-context select\{[^}]*border-radius:6px/)
+  assert.match(component, /\.chat-context select:focus,\.chat-context input:focus\{/)
 })
 
 test('composer blank areas focus the editor without hijacking controls or selection', () => {
@@ -43,18 +43,29 @@ test('committing a chapter selection returns focus to the chat input', () => {
   assert.match(component, /function focusChatInput\(\) \{ void nextTick\(\(\) => sender.value\?\.focus\('last'\)\)/)
 })
 
-test('conversation management is behind an accessible hover menu', () => {
+test('conversation history is a dropdown and current conversation keeps its management menu', () => {
   const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
-  assert.match(component, /v-if="sessionMenu === session.id"/)
-  assert.match(component, /:aria-expanded="sessionMenu === session.id"/)
-  assert.match(component, /\.chat-session-row:hover \.chat-more-trigger/)
-  assert.match(component, /\.chat-session-row:focus-within \.chat-more-trigger/)
-  assert.match(component, /@media\(hover:none\)/)
+  assert.match(component, /aria-label="选择创作对话"/)
+  assert.match(component, /v-for="session in sessions"/)
+  assert.match(component, /v-if="sessionMenu === selected"/)
+  assert.match(component, /:aria-expanded="sessionMenu === selected"/)
   assert.match(component, /await ElMessageBox.prompt\(/)
   assert.match(component, /await ElMessageBox.confirm\(/)
   assert.equal((component.match(/customClass: 'chat-project-dialog'/g) || []).length, 2)
   assert.match(component, /\.el-message-box\.chat-project-dialog/)
   assert.doesNotMatch(component, /window\.(confirm|prompt)\(/)
+})
+
+test('chat uses a full-width single column, model picker beside send, and no nested process scroll', () => {
+  const component = readFileSync(new URL('./ChatPanel.vue', import.meta.url), 'utf8')
+  assert.match(component, /\.chat-workbench\{[^}]*display:block/)
+  assert.doesNotMatch(component, /对话工作台/)
+  const actions = component.split('<template #action-list>')[1].split('</template>')[0]
+  assert.ok(actions.indexOf('chat-model-picker') < actions.indexOf('chat-send-button'))
+  assert.match(actions, /chat-model-picker" @pointerdown\.stop @mousedown\.stop @click\.stop/)
+  assert.match(component, /\.chat-workbench\{[^}]*width:min\(1280px,100%\)[^}]*margin:0 auto/)
+  const processStyle = component.match(/\.chat-process-log\{([^}]*)\}/)?.[1] || ''
+  assert.doesNotMatch(processStyle, /overflow|max-height/)
 })
 
 test('selecting or creating a conversation focuses the sender after loading', () => {

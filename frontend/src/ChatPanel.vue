@@ -16,12 +16,14 @@ import { importStoryRequirements } from './storyReview'
 import RevisionApplyDialog from './RevisionApplyDialog.vue'
 import ChatIllustrationPreview from './ChatIllustrationPreview.vue'
 
-const props = defineProps<{ projectId: string; chapterNumber: number | null; modelName: string }>()
-const emit = defineEmits<{ task: [id: string] }>()
+const props = defineProps<{ projectId: string; chapterNumber: number | null; modelName: string; models: string[] }>()
+const emit = defineEmits<{ task: [id: string]; 'update:modelName': [name: string] }>()
 type Event = ChatEvent
 type Session = { id: string; title: string; chapter: number | null }
 const sessions = ref<Session[]>([])
 const selected = ref('')
+const selectedModel = computed({ get: () => props.modelName, set: value => emit('update:modelName', value) })
+const currentSession = computed(() => sessions.value.find(item => item.id === selected.value))
 const sessionMenu = ref('')
 function closeSessionMenu(event: FocusEvent) {
   if (!(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) sessionMenu.value = ''
@@ -299,18 +301,14 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 
 <template>
   <section class="chat-workbench">
-    <aside class="chat-sessions"><div class="chat-session-head"><strong>创作对话</strong><button type="button" class="chat-button chat-button-secondary" @click="create">新对话</button></div>
-      <div v-for="session in sessions" :key="session.id" class="chat-session-row" @keydown.esc="sessionMenu = ''" @focusout="closeSessionMenu">
-        <button class="chat-session" :class="{ selected: selected === session.id }" @click="choose(session.id)">{{ session.title }}<small>{{ session.chapter ? `第 ${session.chapter} 章` : '未指定章节' }}</small></button>
-        <div class="chat-session-more" :class="{ open: sessionMenu === session.id }">
-          <button type="button" class="chat-more-trigger" :aria-label="`管理对话：${session.title}`" :aria-expanded="sessionMenu === session.id" :aria-controls="`session-menu-${session.id}`" @click="sessionMenu = sessionMenu === session.id ? '' : session.id">⋯</button>
-          <div v-if="sessionMenu === session.id" :id="`session-menu-${session.id}`" class="chat-session-menu"><button type="button" :disabled="managingSession" @click="renameSession(session)">重命名</button><button type="button" :disabled="managingSession" @click="deleteSession(session)">删除</button></div>
-        </div>
-      </div>
-    </aside>
     <div class="chat-desk">
-      <header><p class="eyebrow">对话工作台</p><h1>说出想写的下一步。</h1><p>讨论、分幕、续写和修订，从一个目标开始。正文仍在阅读页展示。</p></header>
-      <div class="chat-context"><label>当前章 <input v-model.number="chapter" type="number" min="1" placeholder="章号" @change="focusChatInput"></label><span>{{ modelName || '尚未选择模型' }}</span><small>{{ connected ? '实时连接' : selected ? '连接中／正在重连' : '会话会自动保存' }}</small></div>
+      <div class="chat-context">
+        <label>当前章 <input v-model.number="chapter" type="number" min="1" placeholder="章号" @change="focusChatInput"></label>
+        <label class="chat-session-picker"><span>对话</span><select :value="selected" aria-label="选择创作对话" @change="choose(($event.target as HTMLSelectElement).value)"><option v-if="!sessions.length" value="">暂无对话</option><option v-for="session in sessions" :key="session.id" :value="session.id">{{ session.title }} · {{ session.chapter ? `第 ${session.chapter} 章` : '未指定章节' }}</option></select></label>
+        <button type="button" class="chat-button chat-button-secondary chat-new-session" @click="create">新对话</button>
+        <div v-if="currentSession" class="chat-current-menu" @keydown.esc="sessionMenu = ''" @focusout="closeSessionMenu"><button type="button" class="chat-more-trigger" aria-label="管理当前对话" :aria-expanded="sessionMenu === selected" @click="sessionMenu = sessionMenu === selected ? '' : selected">⋯</button><div v-if="sessionMenu === selected" class="chat-session-menu"><button type="button" :disabled="managingSession" @click="renameSession(currentSession)">重命名</button><button type="button" :disabled="managingSession" @click="deleteSession(currentSession)">删除</button></div></div>
+        <small>{{ connected ? '实时连接' : selected ? '连接中／正在重连' : '会话会自动保存' }}</small>
+      </div>
       <div ref="transcript" class="chat-transcript" aria-live="polite" tabindex="0" aria-label="聊天记录">
         <div v-if="!messages.length" class="chat-empty"><strong>先聊目标，再执行。</strong><p>例如：先看看下一章该如何推进，给我一份分幕。</p><p>也可以要求修改当前分幕，或审校已经写好的章节。</p></div>
         <article v-for="event in messages" :key="event.id" class="chat-entry" :class="event.kind">
@@ -347,7 +345,7 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
           :disabled="busy" :loading="busy || !!running" :custom-style="{ minHeight: '76px', maxHeight: '220px' }"
           placeholder="说说你想做什么…" @change="inputChanged" @submit="send">
           <template #prefix><small class="chat-key-hint">Enter 发送 · Shift+Enter 换行</small></template>
-          <template #action-list><button v-if="running" type="button" class="chat-button chat-button-secondary" @click="stop">停止回复</button><button type="button" class="chat-button chat-send-button" :aria-busy="busy || !!running" :disabled="busy || !!running || !input.trim()" @click="send">{{ busy ? '发送中…' : running ? '正在回复…' : '发送' }}</button></template>
+          <template #action-list><label class="chat-model-picker" @pointerdown.stop @mousedown.stop @click.stop><span>模型</span><select v-model="selectedModel" aria-label="选择对话模型" @pointerdown.stop @mousedown.stop @click.stop><option v-if="!models.length" value="">未配置模型</option><option v-for="name in models" :key="name" :value="name">{{ name }}</option></select></label><button v-if="running" type="button" class="chat-button chat-button-secondary" @click="stop">停止回复</button><button type="button" class="chat-button chat-send-button" :aria-busy="busy || !!running" :disabled="busy || !!running || !input.trim()" @click="send">{{ busy ? '发送中…' : running ? '正在回复…' : '发送' }}</button></template>
           <template #footer><div class="chat-composer-note">聊天操作点击即执行；候选稿不会自动应用，续写不覆盖已有正文。</div></template>
         </XSender>
       </div>
@@ -357,20 +355,20 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 </template>
 
 <style scoped>
-.chat-workbench{flex:1;min-height:0;width:100%;display:grid;grid-template-columns:220px minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:24px;max-width:1500px;margin:0 auto;padding:20px 24px;overflow:hidden}
+.chat-workbench{flex:1;min-height:0;width:min(1280px,100%);display:block;margin:0 auto;padding:10px 20px 14px;overflow:hidden}
 .chat-sessions{min-height:0;overflow-y:auto;border-right:1px solid #d4e1dd;padding-right:18px;scrollbar-width:thin}
 .chat-session-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
 .chat-button{font-family:inherit;font-size:14px;font-weight:600;line-height:1.2}
 .chat-button{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:8px 16px;border:1px solid #397b69;border-radius:8px;background:#397b69;color:#fff;font:600 14px/1.2 inherit;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,opacity .15s}.chat-button:hover:not(:disabled){background:#2c6455;border-color:#2c6455}.chat-button:focus-visible{outline:2px solid #79a998;outline-offset:3px}.chat-button:disabled{opacity:.45;cursor:not-allowed}.chat-button-secondary{background:#f8fbf9;border-color:#bed4ca;color:#356b59}.chat-button-secondary:hover:not(:disabled){background:#e1eeea;border-color:#92b6a6}.chat-send-button{min-width:76px}.chat-send-button[aria-busy="true"]::before{content:'';width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:chat-button-spin .8s linear infinite}@keyframes chat-button-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.chat-send-button[aria-busy="true"]::before{animation:none}}
 .chat-session{display:block;width:100%;text-align:left;color:#244f50;background:transparent;margin:6px 0;padding:14px;border:1px solid transparent}
 .chat-session.selected{background:#e1eeea;border-color:#9cbeb0}.chat-session small{display:block;margin-top:8px;color:#698585}
-.chat-desk{min-width:0;min-height:0;display:flex;flex-direction:column}.chat-desk>header{flex-shrink:0}
+.chat-desk{width:100%;height:100%;min-width:0;min-height:0;display:flex;flex-direction:column}
 .chat-desk h1{font-family:var(--font-display,serif);font-size:26px;margin:6px 0 8px}.chat-desk header p{color:#688486;margin:5px 0 10px}
-.chat-context{display:flex;gap:20px;align-items:center;flex-wrap:wrap;border-block:1px solid #d4e1dd;padding:10px 0;flex-shrink:0}
-.chat-context label{display:flex;gap:10px;align-items:center}.chat-context input{width:95px;min-height:38px;padding:7px 10px;border:1px solid #cbdad2;border-radius:6px;background:#fbfdfb;color:#263a40;font:inherit;accent-color:#326b59;transition:border-color .15s,box-shadow .15s}.chat-context input:hover{border-color:#92b6a6}.chat-context input:focus{outline:none;border-color:#79a998;box-shadow:0 0 0 2px #79a99833}.chat-context small{margin-left:auto;color:#698585}
+.chat-context{display:flex;gap:10px;align-items:center;border-bottom:1px solid #d4e1dd;padding:0 2px 10px;flex-shrink:0}
+.chat-context label{display:flex;gap:8px;align-items:center;color:#527064;font-size:13px}.chat-context input,.chat-context select{min-height:36px;padding:6px 10px;border:1px solid #cbdad2;border-radius:6px;background:#fbfdfb;color:#263a40;font:inherit;transition:border-color .15s,box-shadow .15s}.chat-context input{width:88px}.chat-context select:hover,.chat-context input:hover{border-color:#92b6a6}.chat-context select:focus,.chat-context input:focus{outline:none;border-color:#79a998;box-shadow:0 0 0 2px #79a99833}.chat-session-picker{min-width:0;flex:0 1 440px}.chat-session-picker select{width:100%;min-width:150px}.chat-context small{margin-left:auto;color:#698585}.chat-new-session{min-height:36px}.chat-current-menu{position:relative}.chat-current-menu .chat-more-trigger{opacity:1;min-width:36px;height:36px;border:1px solid #cbdad2;background:#f8fbf9}.chat-current-menu .chat-session-menu{z-index:8}
 .chat-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0;flex-shrink:0;font-size:12px;color:#698585}
 .chat-chapter-state{margin-right:auto}.chat-shortcuts button,.chat-shortcuts a{border:1px solid #bed4ca;border-radius:18px;padding:5px 12px;color:#356b59;background:#f8fbf9;font-size:12px;text-decoration:none}.chat-shortcuts button:hover:not(:disabled),.chat-shortcuts a:hover{background:#e1eeea}
-.chat-transcript{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;scrollbar-width:thin;margin-top:12px;padding:16px 20px 20px;background:#fcfdfc;border:1px solid #dce6e1;border-radius:10px;scroll-padding-bottom:20px}
+.chat-transcript{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;margin-top:10px;padding:16px 20px 20px;background:#fcfdfc;border:1px solid #dce6e1;border-radius:10px;scroll-padding-bottom:20px}
 .chat-transcript:focus-visible{outline:2px solid #79a998;outline-offset:-2px}
 .chat-empty{padding:32px 20px;border-left:3px solid #79a998;color:#688486}
 .chat-entry{white-space:pre-wrap;overflow-wrap:anywhere;padding:10px 0;margin:8px 0;line-height:1.8}.chat-entry p{margin:0}
@@ -388,14 +386,15 @@ onUnmounted(() => { ++loadVersion; ++chapterCheck; clearTimeout(chapterTimer); s
 .chat-entry.progress,.chat-entry.task_progress{font-size:14px;color:#698585;padding:2px 0}
 .chat-entry.action,.chat-entry.task_result{border:1px solid #bed4ca;border-left:4px solid #397b69;padding:20px;border-radius:6px}.chat-entry.action button{margin-top:14px}
 .chat-entry.failed,.chat-entry.interrupted{color:#a74026;background:#fff1e9;padding:14px}
-.chat-entry.process{padding:0;white-space:normal}.chat-process{border:1px solid #bacdc8;border-radius:7px;background:#edf3f1;color:#4f7068}.chat-process summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:11px 14px;cursor:pointer;list-style:none;font-size:12px}.chat-process summary::before{content:'▸'}.chat-process[open] summary::before{content:'▾'}.chat-process-title{font-weight:700}.chat-process summary small{margin-left:auto}.chat-process-latest{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:18px;opacity:.85}.chat-process.failed,.chat-process.interrupted{border-color:#d4a68c}.chat-process.running .chat-process-title{color:#2c7760}.chat-process-log{max-height:260px;overflow-y:auto;overscroll-behavior-y:auto;scrollbar-width:thin;background:#19343a;color:#c5d8d2;padding:12px 14px;border-radius:0 0 6px 6px;font:12px/1.8 Consolas,'Microsoft YaHei',monospace}.chat-process-line{display:grid;grid-template-columns:64px 34px minmax(0,1fr);gap:8px;margin-bottom:9px}.chat-process-line time{color:#8ca9a5}.chat-process-line>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-process-line small{display:block;color:#91afa5}.chat-process-line.error{color:#efb39c}.chat-process-line.success{color:#97d5ae}
+.chat-entry.process{padding:0;white-space:normal}.chat-process{border:1px solid #bacdc8;border-radius:7px;background:#edf3f1;color:#4f7068}.chat-process summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;padding:11px 14px;cursor:pointer;list-style:none;font-size:12px}.chat-process summary::before{content:'▸'}.chat-process[open] summary::before{content:'▾'}.chat-process-title{font-weight:700}.chat-process summary small{margin-left:auto}.chat-process-latest{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:18px;opacity:.85}.chat-process.failed,.chat-process.interrupted{border-color:#d4a68c}.chat-process.running .chat-process-title{color:#2c7760}.chat-process-log{background:#19343a;color:#c5d8d2;padding:12px 14px;border-radius:0 0 6px 6px;font:12px/1.8 Consolas,'Microsoft YaHei',monospace}.chat-process-line{display:grid;grid-template-columns:64px 34px minmax(0,1fr);gap:8px;margin-bottom:9px}.chat-process-line time{color:#8ca9a5}.chat-process-line>div{white-space:pre-wrap;overflow-wrap:anywhere}.chat-process-line small{display:block;color:#91afa5}.chat-process-line.error{color:#efb39c}.chat-process-line.success{color:#97d5ae}
 .chat-composer{position:static;flex-shrink:0;min-width:0;margin-top:12px;border-radius:10px;box-shadow:0 4px 15px #193a3310;--el-color-primary:#397b69;--el-border-color:#b8d2c7;--el-text-color-regular:#263a40;--el-text-color-primary:#263a40;--el-text-color-placeholder:#698585;--el-bg-color:#fff;--el-fill-color-blank:#fff;--chat-primary:#397b69;--chat-text:#263a40;--chat-input-shadow-color:#397b6933}
 .chat-key-hint{font-size:12px;color:#698585}.chat-composer-note{font-size:12px;color:#698585;padding:8px 16px}
 .chat-composer :deep(.elx-x-sender__action-list){gap:10px}.chat-composer :deep(.chat-rich-text){font:inherit;line-height:1.8}
+.chat-model-picker{display:flex;align-items:center;gap:7px;color:#698585;font-size:12px}.chat-model-picker select{max-width:190px;min-height:36px;padding:6px 28px 6px 10px;border:1px solid #bed4ca;border-radius:7px;background:#f8fbf9;color:#356b59;font:inherit;font-size:13px}.chat-model-picker select:focus{outline:2px solid #79a998;outline-offset:2px}
 .chat-composer :deep(.chat-placeholder-wrap),.chat-composer :deep(.chat-placeholder-wrap *){color:#9baaa6!important;font-weight:400!important}
 .chat-composer :deep(.elx-x-sender){display:block;border-radius:10px;background:#fff}.chat-composer :deep(.elx-x-sender):focus-within{outline:2px solid #79a998;outline-offset:2px}
-@media(max-height:750px){.chat-desk>header{display:none}.chat-workbench{padding-block:12px}.chat-composer-note{display:none}}
-@media(max-width:800px){.chat-workbench{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr);padding:10px 14px;gap:10px}.chat-sessions{border-right:0;display:flex;gap:8px;overflow:auto;max-height:76px;padding:0}.chat-session{min-width:150px;margin:0;padding:9px}.chat-session-head{min-width:120px;margin:0}.chat-desk>header{display:none}.chat-context{gap:12px}.chat-chapter-state{width:100%}.chat-composer .chat-key-hint{display:none}.chat-shortcuts{padding:6px 0}.chat-transcript{padding-top:4px}}
+@media(max-height:750px){.chat-workbench{padding-block:8px}.chat-composer-note{display:none}}
+@media(max-width:800px){.chat-workbench{padding:8px}.chat-context{flex-wrap:wrap}.chat-session-picker{order:3;flex-basis:100%}.chat-context small{margin-left:auto}.chat-chapter-state{width:100%}.chat-composer .chat-key-hint,.chat-model-picker span{display:none}.chat-model-picker select{max-width:130px}.chat-shortcuts{padding:6px 0}.chat-transcript{padding:8px 10px}}
 </style>
 
 <!-- MessageBox is teleported to body; scope these styles with its custom class. -->

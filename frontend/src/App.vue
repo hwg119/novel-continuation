@@ -552,15 +552,15 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
     <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="configNav.icon" /></svg><span>{{ configNav.label }}</span></button>
     <div class="side-foot">本机运行 · 数据保留在原工程目录</div></div>
 </aside><main class="main" :class="{ 'console-visible': consoleLayout.visible, 'console-expanded': consoleLayout.expanded }">
-  <header v-if="!bookMode" class="toolbar"><div class="crumb">{{ project?.name || '请选择工程' }} <span v-if="chapterNumber !== null">/ 第 {{ chapterNumber }} 章</span></div>
+  <header v-if="!bookMode && activeTab !== 'chat'" class="toolbar"><div class="crumb">{{ project?.name || '请选择工程' }} <span v-if="chapterNumber !== null">/ 第 {{ chapterNumber }} 章</span></div>
     <div class="toolbar-actions"><label class="model-picker">模型 <select v-model="modelName"><option v-for="name in models" :key="name">{{ name }}</option></select></label>
       <span class="save-state" :class="{ unsaved: dirty }">{{ dirty ? '未保存修改' : '已同步' }}</span>
       <button type="button" class="save-button" :disabled="!dirty || busy" @click="save">{{ busy ? '保存中…' : '保存章节' }}</button></div></header>
   <HomePanel v-if="activeTab === 'home'" :project-id="projectId" :project-name="project?.name || ''"
     :chapters="chapters" :model-name="modelName" :wiki-pending-count="wikiPendingCount" :generating="generating"
     @generate="generate" @settings="openSettings" @chapter="openChapter" @navigate="switchTab" />
-  <ChatPanel v-else-if="activeTab === 'chat'" :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName"
-    @task="taskStarted" />
+  <ChatPanel v-else-if="activeTab === 'chat'" :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName" :models="models"
+    @update:model-name="modelName = $event" @task="taskStarted" />
   <template v-else-if="activeTab === 'write'"><div class="reading-layout">
     <aside class="reading-index" :class="{ open: bookIndexOpen }" aria-label="本书章节目录"><div class="reading-index-head"><strong>章节目录</strong><span>{{ chapters.length }} 章</span><button v-if="bookMode" type="button" aria-label="关闭章节目录" @click="bookIndexOpen = false">×</button></div>
       <div v-if="!bookMode && chapters.length" class="chapter-export-tools"><button type="button" @click="toggleAllExportChapters">{{ selectedExportChapters.length === chapters.length ? '清空' : '全选' }}</button><span>已选 {{ selectedExportChapters.length }} 章</span><button type="button" class="chapter-export-submit" :disabled="!selectedExportChapters.length || exportingChapters" @click="exportSelectedChapters">{{ exportingChapters ? '生成中…' : '合并导出' }}</button></div>
