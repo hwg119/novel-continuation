@@ -781,11 +781,12 @@ def register_features(app: FastAPI, workspace_root: str,
     @app.post("/api/projects/{project_id}/chapters/{number}/summary",
               dependencies=[Depends(_write_required)])
     def regenerate_chapter_summary(project_id: str, number: int, payload: ChapterRequest):
-        from core.continuation import (ContinuationLLM, generate_chapter_summary,
+        from core.continuation import (DEFAULT_SUMMARY_CHARS, ContinuationLLM, generate_chapter_summary,
                                        validate_chapter_summary, write_chapter_summary)
         path, chapter_file = existing_chapter(project_id, number)
         settings = load_project_settings(path)
-        max_chars = int(settings.get("summary_chars", 150) or 150)
+        max_chars = int(settings.get("summary_chars", DEFAULT_SUMMARY_CHARS)
+                        or DEFAULT_SUMMARY_CHARS)
         model_cfg = llm(payload.model_name)
 
         def work(update):

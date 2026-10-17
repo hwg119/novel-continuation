@@ -9,11 +9,15 @@
 - 人物使用的资料或物件是否已经取得，来源和跨幕时间是否成立？人物尚不知道某物存在时，也不能提前计划比对那件后来才偶然发现的具体物件；泛称将来寻找样本不算提前使用。同步动作、已知信息、新增信息和结尾状态；相关幕遗留问题若使本次修改无法成立，也应指出。
 - 场景是否建立实际联系和有意义的变化，而不是仅把两条线写在一起宣布交叉确认？不要求每幕都有反转，保留有效静场。
 
+时间顺序作为独立维度核对整份候选，而不是按“月、日、上午、下午”做机械排序。综合年份、相对日期、跨日推进、视角切换以及“与此同时、回忆、倒叙”等叙事标记，判断阅读顺序是否可解释。去年九月到今年八月属于向前推进；同一月日也可能属于不同年份。只有先后关系无法同时成立且会影响行动或因果时判为 unmet；缺少年份或参照点而无法判断时用 uncertain，不猜测具体日期。
+
 不制造与本次修改无关的要求。改动替换原有段落与状态，不追加一套相互冲突的新旧说明。
 
 输出 JSON：
-{"requirement_scope":"content 或 labels","passed":true,"summary":"简短说明整体效果","unresolved":[],"requirement_checks":[{"id":"U01","status":"met 或 unmet 或 uncertain","judgment":"present 或 missing","reason":"完整目标的落实情况与不足","evidence":[{"beat":1,"field":"desc 或 name","quote":"当前候选中的短原句"}],"reviewed_beats":[1],"suggestion":"unmet 时填写最小可执行补修方向"}],"continuity_checks":[{"focus":"修改牵动的核对目标","status":"met 或 unmet 或 uncertain","judgment":"present 或 missing","reason":"实际依据与判断","evidence":[{"beat":1,"field":"desc","quote":"当前候选中的短原句"}],"reviewed_beats":[1],"suggestion":"unmet 时填写最小补修方向"}]}
+{"requirement_scope":"content 或 labels","passed":true,"summary":"简短说明整体效果","unresolved":[],"requirement_checks":[{"id":"U01","status":"met 或 unmet 或 uncertain","judgment":"present 或 missing","reason":"完整目标的落实情况与不足","evidence":[{"beat":1,"field":"desc 或 name","quote":"当前候选中的短原句"}],"reviewed_beats":[1],"suggestion":"unmet 时填写最小可执行补修方向"}],"continuity_checks":[{"focus":"修改牵动的核对目标","status":"met 或 unmet 或 uncertain","judgment":"present 或 missing","reason":"实际依据与判断","evidence":[{"beat":1,"field":"desc","quote":"当前候选中的短原句"}],"reviewed_beats":[1],"suggestion":"unmet 时填写最小补修方向"}],"timeline_check":{"status":"met 或 unmet 或 uncertain","reason":"整章时间顺序为何成立、冲突或无法确认","reviewed_beats":[1],"evidence":[{"beat":1,"field":"desc","quote":"当前候选描述中的时间短原句"}],"suggestion":"unmet 时填写最小修补方向"}}
 
 requirement_checks 只返回完整目标 U01 一项，可引用多幕证明各部分；continuity_checks 按实际影响组织少量核对项，内容修订不能省略，纯名称表达修订且不影响剧情时可为空。原规划仅用于比较，所有引文来自当前候选，不用改写或拼接后的长句充当引文。幕号按候选数组位置从1编号；仅回目证据使用 beat=0、field="chapter_title"。
+
+timeline_check 必须独立返回并核对全部候选幕，reviewed_beats 列出所有幕号。时间信息已经渲染在各幕 desc 开头，证据引用其中的时间短原句；必须结合叙事内容时再引用对应事件。不要因为下一幕日期文字看起来较小就直接判定倒退，先判断年份、相对参照和是否并行或倒叙。
 
 present 依据实际出现的内容判断；完整目标 U01 的 missing 判断须核对全部候选幕，reviewed_beats 列出全部幕号，不能由一句未提及推断全章没有。continuity_checks 核对局部因果或前后顺序时，reviewed_beats 覆盖引用涉及的相关幕；若断言整章没有某过程则应核对全部幕。直接出现的错误确认或时序冲突用 present，不必强行归为 missing。证据不足用 uncertain，不自动补修。只有完整目标落实、修改牵动的逻辑成立且无未解决问题时 passed=true。summary 与核对结果一致，不另添新结论。

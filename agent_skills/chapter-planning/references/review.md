@@ -8,7 +8,7 @@
 
 每项问题补充 category（repetition / progression / causality / continuity / editorial）、impact（对故事的实际影响）、missing_link（重复或缺失的变化/关联，无则空）。suggestion 指向实际事件或场景作用的调整，不只换措辞。不必输出所有幕的分析，不凑问题。
 
-有本次原始创作要求时，同时输出 requirement_checks，覆盖其中实际创作目标，不能只检查连续性。每项包含 requirement（从本次要求摘取连续原文）、met（布尔）、evidence（具体哪幕的事件、选择或后果如何落实/为何未落实）、plan_quote（待审规划中的连续原句）、suggestion（未落实时的调整方向）。增强推进或波澜须有实际选择、阻力、后果或局面变化，谨慎措辞和新增解释本身不算。met=false 会进入定向修补；无需另在 issues 重复同一项。没有本次要求输出空数组。不强求改变所有幕。
+有程序登记的创作目标时，同时输出 requirement_checks，按给定 id 覆盖完整目标，不能自己拆分、改名或复述要求，也不能只检查连续性。每项包含 id、met（布尔）、evidence（具体哪些幕的事件、选择或后果落实了完整目标，或完整目标的哪部分未落实）、plan_citations（数组，每项为候选规划来源编号 P01…及其中的连续原句）、suggestion（未落实时的调整方向）。met=true 至少提供一条可定位的候选规划引文，目标涉及多幕时分别引用；U01 用户要求原文不能充当落实证据。met=false 时，若候选中有冲突内容就引用它，若要求的事情完全未发生则 plan_citations 为空数组，并在 evidence 说明缺失，不得虚构引文。增强推进或波澜须有实际选择、阻力、后果或局面变化，谨慎措辞和新增解释本身不算。met=false 会进入定向修补；无需另在 issues 重复同一项。没有登记目标时输出空数组。不强求改变所有幕。
 
 结尾状态与场景叙述相互概括是结构化记录的正常用途，不作为剧情重复；只核对跨幕/跨章是否重复演出同一结果。新规划也可以沿用有效话题，重新构建不等于为了不同而不同。
 
@@ -17,4 +17,4 @@ body 是正文，summary 是摘要，wiki 是按章记录，plan 是待审规划
 high：时间线、人物状态、信息权限或关键因果不能成立。medium：重复发现、整幕功能重复或没有新结果，以及重要物件状态冲突。low：不改变事实的姓名写法、错字和计数称谓等。疑惑本身不是错误。
 
 输出 JSON：{"issues":[{"severity":"high或medium或low","category":"repetition / progression / causality / continuity / editorial","scope":"涉及的幕","problem":"具体问题及依据","impact":"故事受到的影响","missing_link":"缺失变化或关联，无则空","citations":[{"source_id":"证据目录编号","quote":"连续短原句"},{"source_id":"对应规划编号","quote":"连续短原句"}],"suggestion":"最小调整方式"}],"uncertainties":[]}。
-high/medium 至少两段准确原句。U01 是本次要求，只能支持目标验收，不支持历史事实判断。没有充分依据的问题输出空数组；不要为了给建议而泛泛挑错。上述 JSON 顶层同时包含 "requirement_checks":[{"requirement":"原要求短句","met":true,"evidence":"具体效果","plan_quote":"规划短原句","suggestion":""}]。
+high/medium 至少两段准确原句。U01 是本次要求，只能支持目标验收，不支持历史事实判断。没有充分依据的问题输出空数组；不要为了给建议而泛泛挑错。上述 JSON 顶层同时包含 "requirement_checks":[{"id":"U01","met":true,"evidence":"完整目标在各幕中的具体落实效果","plan_citations":[{"source_id":"P01","quote":"候选规划中的连续短原句"}],"suggestion":""}]。

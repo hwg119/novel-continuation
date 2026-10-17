@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Core } from 'cytoscape'
-import { api } from './api'
+import { api, writeOptions } from './api'
+import { toast } from './toastService'
 
 type Source = { id: string; path: string; symbol: string | null }
 type InputDetail = { 0: string; 1: string; 2: string }
@@ -11,10 +12,14 @@ type MapData = { nodes: Node[]; edges: Edge[]; scope: string; version: string }
 type SourceData = Source & { text: string; start_line: number; end_line: number; total_end_line: number; truncated: boolean; hash: string }
 type Run = { id: string; bytes: number; modified_at: number }
 type Event = { index: number; event: string; timestamp: string | null; stage: string; fields: string[]; elapsed_ms: number | null }
+type QualityCase = { id:string; dimension:string; expected:string; previous:string; text:string; short_article:string; long_article:string; requires_issue:boolean }
+type QualitySuite = { suite:string; fixture_version:string; boundary:string; cases:QualityCase[] }
+type QualityRun = { id:string; modified_at:number; cases:number; variants:string[]; screened_passes:number }
+type QualityJob = { id:string; status:string; message:string; stage?:string; result?: { run_id?:string; screened_passes?:number; cases?:number } | null }
 const props = defineProps<{ projectId: string }>()
 const map = ref<MapData | null>(null)
 const selected = ref('audit')
-const mode = ref<'map' | 'runtime'>('map')
+const mode = ref<'map' | 'runtime' | 'quality'>('map')
 const error = ref('')
 const graphElement = ref<HTMLElement | null>(null)
 const sourceData = ref<SourceData | null>(null)
@@ -27,6 +32,15 @@ const eventData = ref<{ text: string; truncated: boolean; total_chars: number; w
 const eventIndex = ref<number | null>(null)
 const inspector = ref<'source' | 'event' | null>(null)
 const loading = ref(false)
+const qualitySuite = ref<QualitySuite | null>(null)
+const qualityRuns = ref<QualityRun[]>([])
+const qualityModel = ref('deepseek-flash')
+const qualityModels = ref<string[]>([])
+const qualityJob = ref<QualityJob | null>(null)
+const compareLeft = ref('')
+const compareRight = ref('')
+const qualityComparison = ref<any>(null)
+let qualityTimer: ReturnType<typeof setTimeout> | null = null
 let graph: Core | null = null
 let observer: ResizeObserver | null = null
 let sourceRequest = 0
@@ -126,20 +140,59 @@ async function openEvent(event: Event) {
   } catch (cause) { if (request === logRequest) error.value = String(cause) }
   finally { if (request === logRequest) loading.value = false }
 }
-watch(mode, () => { if (mode.value === 'map') render(); else { graph?.destroy(); graph=null; observer?.disconnect(); refreshRuns() } })
+async function refreshQuality() {
+  loading.value = true; error.value = ''
+  try {
+    const [suite, items, models] = await Promise.all([api<QualitySuite>('/api/developer/quality/cases'), api<QualityRun[]>('/api/developer/quality/runs'), api<{models:string[]; default:string | null}>('/api/developer/quality/models')])
+    qualitySuite.value = suite; qualityRuns.value = items
+    qualityModels.value = models.models
+    if (!qualityModels.value.includes(qualityModel.value) && models.default) qualityModel.value = models.default
+    if (!compareLeft.value && items[0]) compareLeft.value = items[0].id
+    if (!compareRight.value && items[1]) compareRight.value = items[1].id
+  } catch (cause) { error.value = String(cause) }
+  finally { loading.value = false }
+}
+async function startQuality(long: boolean) {
+  if (!props.projectId) { error.value = '请先选择工程，用于保存后台任务状态。'; return }
+  error.value = ''; qualityComparison.value = null
+  try {
+    qualityJob.value = await api<QualityJob>(`/api/projects/${props.projectId}/developer/quality/runs`, writeOptions('POST', { model_config: qualityModel.value, long }))
+    pollQuality()
+  } catch (cause) { error.value = String(cause) }
+}
+async function pollQuality() {
+  if (!qualityJob.value || !props.projectId) return
+  try {
+    const job = await api<QualityJob>(`/api/projects/${props.projectId}/jobs/${qualityJob.value.id}`)
+    qualityJob.value = job
+    if (job.status === 'running') qualityTimer = setTimeout(pollQuality, 1200)
+    else await refreshQuality()
+  } catch (cause) { error.value = String(cause) }
+}
+async function compareQuality() {
+  if (!compareLeft.value || !compareRight.value || compareLeft.value === compareRight.value) {
+    toast.info('请分别选择一份基准运行和一份不同的对比运行，再查看两侧审校结论。')
+    return
+  }
+  loading.value = true; error.value = ''
+  try { qualityComparison.value = await api<any>(`/api/developer/quality/runs/compare?left=${encodeURIComponent(compareLeft.value)}&right=${encodeURIComponent(compareRight.value)}`) }
+  catch (cause) { error.value = String(cause) }
+  finally { loading.value = false }
+}
+watch(mode, () => { if (mode.value === 'map') render(); else { graph?.destroy(); graph=null; observer?.disconnect(); if (mode.value === 'runtime') refreshRuns(); else refreshQuality() } })
 watch(() => props.projectId, () => { error.value=''; refreshRuns() })
 onMounted(async () => {
   mounted = true
   try { map.value = await api<MapData>('/api/developer/map'); if (mounted) await render() }
   catch (cause) { error.value=String(cause) }
 })
-onBeforeUnmount(() => { mounted=false; sourceRequest++; logRequest++; graph?.destroy(); observer?.disconnect() })
+onBeforeUnmount(() => { mounted=false; sourceRequest++; logRequest++; graph?.destroy(); observer?.disconnect(); if (qualityTimer) clearTimeout(qualityTimer) })
 </script>
 
 <template>
   <section class="developer-panel">
     <header class="developer-heading"><div><span class="developer-eyebrow">开发者 · 只读</span><h1>从入口，看到每一次模型调用。</h1><p>逻辑地图看设计；运行回放看实际发生。这里不会生成或修改小说。</p></div></header>
-    <div class="developer-tabs" role="tablist" aria-label="开发者视图"><button role="tab" :aria-selected="mode === 'map'" @click="mode = 'map'">逻辑地图</button><button role="tab" :aria-selected="mode === 'runtime'" @click="mode = 'runtime'">运行回放</button></div>
+    <div class="developer-tabs" role="tablist" aria-label="开发者视图"><button role="tab" :aria-selected="mode === 'map'" @click="mode = 'map'">逻辑地图</button><button role="tab" :aria-selected="mode === 'runtime'" @click="mode = 'runtime'">运行回放</button><button role="tab" :aria-selected="mode === 'quality'" @click="mode = 'quality'">质量回归</button></div>
     <p v-if="error" class="developer-error" role="alert">{{ error }}</p>
     <template v-if="mode === 'map'">
       <p class="developer-note">{{ map?.scope || '正在读取结构…' }} <span v-if="map">· 地图版本 {{ map.version }}</span></p>
@@ -159,11 +212,20 @@ onBeforeUnmount(() => { mounted=false; sourceRequest++; logRequest++; graph?.des
         <p v-if="sourceLoading" class="developer-inline-status">正在打开源码检查器…</p>
       </section>
     </template>
-    <template v-else>
+    <template v-else-if="mode === 'runtime'">
       <div class="developer-run-toolbar"><p>来自当前工程的 runs/plan_logs，按事件顺序展示，不推测未记录的调用。</p><button :disabled="loading" @click="refreshRuns">刷新日志</button></div>
       <p class="developer-note">展开详情可能包含小说全文及提示词。已隐藏已配置密钥和常见凭证，但分享前仍需人工检查。</p>
       <p v-if="!props.projectId">请先选择工程。</p><p v-else-if="!runs.length && !loading">尚无完整调用日志。先在创作流程运行一次任务，再刷新。</p>
       <div class="developer-replay"><aside aria-label="选择运行日志"><button v-for="run in runs" :key="run.id" :aria-pressed="runId === run.id" @click="openRun(run.id)"><code>{{ run.id }}</code><small>{{ humanTime(run.modified_at) }} · {{ Math.round(run.bytes / 1024) }} KB</small></button></aside><section><p v-if="!runId">选择一份日志，查看工具查阅、提示词、模型返回与验收事件。</p><p v-if="loading">正在读取…</p><ol class="developer-events"><li v-for="event in events" :key="event.index"><button :aria-pressed="eventIndex === event.index" @click="openEvent(event)"><span>{{ event.index + 1 }}</span><div><strong>{{ event.event }}</strong><small>{{ humanTime(event.timestamp) }} {{ event.stage ? '· ' + event.stage : '' }} {{ event.elapsed_ms != null ? '· ' + event.elapsed_ms + 'ms' : '' }}</small><small>字段：{{ event.fields.join(' · ') }}</small></div></button></li></ol><button v-if="nextOffset !== null" :disabled="loading" @click="openRun(runId, true)">继续读取事件</button></section></div>
+    </template>
+    <template v-else>
+      <section class="quality-ledger">
+        <header><div><span>合成测试账本</span><h2>用固定场景，观察审校能力是否退化。</h2><p>{{ qualitySuite?.boundary || '正在读取固定用例…' }}</p></div><button :disabled="loading" @click="refreshQuality">刷新记录</button></header>
+        <div class="quality-run-controls"><label>模型配置<select v-model="qualityModel" :disabled="!qualityModels.length"><option v-for="item in qualityModels" :key="item" :value="item">{{ item }}</option></select></label><div><button :disabled="!qualityModels.length || (!!qualityJob && qualityJob.status === 'running')" @click="startQuality(false)">短上下文评测</button><button :disabled="!qualityModels.length || (!!qualityJob && qualityJob.status === 'running')" @click="startQuality(true)">长上下文评测</button></div><p>点击才会把固定的合成文本发给所选模型；不会读取、发送或修改小说内容。</p></div>
+        <p v-if="qualityJob" class="quality-job" :class="qualityJob.status">{{ qualityJob.message }}<span v-if="qualityJob.result"> · {{ qualityJob.result.screened_passes }}/{{ qualityJob.result.cases }} 初筛通过</span></p>
+        <div class="quality-cases"><article v-for="item in qualitySuite?.cases" :key="item.id"><strong>{{ item.dimension }}</strong><span :class="item.requires_issue ? 'expect-issue' : 'expect-none'">{{ item.requires_issue ? '应发现问题' : '应不报问题' }}</span><p>{{ item.expected }}</p><details><summary>查看完整合成测试文章</summary><p class="quality-input-note">短上下文与长上下文会分别发送下列完整输入；长版只在目标事实周围加入无关日常段落。</p><small>短上下文 · 完整模型输入</small><pre>{{ item.short_article }}</pre><small>长上下文 · 完整模型输入</small><pre class="quality-long-article">{{ item.long_article }}</pre></details></article></div>
+        <section class="quality-compare"><header><div><span>两次运行对比</span><p>字段差异用于定位；展开后可直接核对两侧的合成输入与完整审校结论。</p></div></header><div class="quality-selects"><select v-model="compareLeft"><option value="">选择基准运行</option><option v-for="item in qualityRuns" :key="item.id" :value="item.id">{{ humanTime(item.modified_at) }} · {{ item.variants.join('/') }}</option></select><span>→</span><select v-model="compareRight"><option value="">选择对比运行</option><option v-for="item in qualityRuns" :key="item.id" :value="item.id">{{ humanTime(item.modified_at) }} · {{ item.variants.join('/') }}</option></select><button :disabled="loading" @click="compareQuality">比较</button></div><p v-if="!qualityRuns.length && !loading">尚无评测运行。首次运行前不调用模型。</p><div v-if="qualityComparison" class="quality-results"><article v-for="row in qualityComparison.cases" :key="row.case"><strong>{{ row.case }}</strong><span>{{ row.status }}</span><p v-if="row.changed?.length">字段变化：{{ row.changed.join('、') }} · 耗时差 {{ row.elapsed_ms_delta }}ms</p><p v-else>字段一致；请展开核对实际审校结论。</p><details><summary>核对两侧内容</summary><div class="quality-side-by-side"><section><h4>基准运行</h4><small>前情</small><pre>{{ qualityComparison.details.left[row.case]?.previous || '旧版日志未保存输入' }}</pre><small>正文</small><pre>{{ qualityComparison.details.left[row.case]?.text || '旧版日志未保存输入' }}</pre><small>审校结论</small><pre>{{ JSON.stringify(qualityComparison.details.left[row.case]?.result || {}, null, 2) }}</pre></section><section><h4>对比运行</h4><small>前情</small><pre>{{ qualityComparison.details.right[row.case]?.previous || '旧版日志未保存输入' }}</pre><small>正文</small><pre>{{ qualityComparison.details.right[row.case]?.text || '旧版日志未保存输入' }}</pre><small>审校结论</small><pre>{{ JSON.stringify(qualityComparison.details.right[row.case]?.result || {}, null, 2) }}</pre></section></div></details></article></div></section>
+      </section>
     </template>
     <div v-if="inspector" class="developer-inspector-backdrop" role="presentation" @click.self="closeInspector">
       <section class="developer-inspector" role="dialog" aria-modal="true" :aria-label="inspector === 'source' ? '源码检查器' : '运行日志检查器'">
@@ -180,4 +242,5 @@ onBeforeUnmount(() => { mounted=false; sourceRequest++; logRequest++; graph?.des
 <style scoped>
 .developer-panel{max-width:1300px;margin:0 auto;padding:26px;color:#263a40}.developer-heading h1{font-family:"KaiTi","STKaiti",serif;font-size:30px;font-weight:400;margin:10px 0}.developer-heading p,.developer-note{color:#698585;font-size:13px;line-height:1.8}.developer-eyebrow{font-size:12px;letter-spacing:.12em;color:#397b69}.developer-tabs{display:flex;gap:8px;margin:22px 0 14px;border-bottom:1px solid #d4e1dd;padding-bottom:12px}.developer-panel button{border:1px solid #bdd2c8;background:#fbfdfb;color:#356b59;border-radius:6px;padding:9px 13px;text-align:left}.developer-panel button[aria-selected="true"],.developer-panel button[aria-pressed="true"]{background:#397b69;color:#fff;border-color:#397b69}.developer-panel button:focus-visible{outline:2px solid #397b69;outline-offset:3px}.developer-panel button:disabled{opacity:.5;cursor:default}.developer-graph{height:480px;background:#fbfdfb;border:1px solid #d4e1dd;border-radius:9px}.developer-node-list{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 24px}.developer-node-list button{font-size:12px}.developer-detail{padding:24px;background:#fff;border:1px solid #d4e1dd;border-radius:9px}.developer-detail>header{display:flex;align-items:baseline;gap:14px}.developer-detail>header>span{color:#698585;font-size:12px}.developer-detail h2{margin:0;font-size:21px}.developer-data-flow{display:grid;grid-template-columns:1fr auto 1fr;gap:20px;align-items:center;margin:22px 0}.developer-data-flow>div{padding:14px 18px;background:#edf4ef;border-radius:6px}.developer-data-flow small{color:#698585}.developer-data-flow p{margin:6px 0;line-height:1.8;font-size:14px}.developer-boundary{border-left:3px solid #bb9b52;padding-left:12px;font-size:13px;line-height:1.8}.developer-neighbours{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0;font-size:12px}.developer-neighbours>span:first-child{width:40px;color:#698585}.developer-source-columns{display:grid;grid-template-columns:1fr 1fr;gap:28px;margin-top:24px}.developer-source-columns h3{font-size:15px}.developer-source-columns button{display:block;width:100%;margin:7px 0;overflow-wrap:anywhere}.developer-panel code{font-family:Consolas,monospace;font-size:12px}.developer-panel small{display:block;font-size:12px;margin-top:5px}.developer-code{margin-top:22px}.developer-code header{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;font-size:12px;overflow-wrap:anywhere}.developer-code pre{max-height:520px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#edf3f1;padding:18px;border-radius:6px;line-height:1.7}.developer-code p{font-size:12px;color:#698585}.developer-error{color:#a33e2a}.developer-run-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px}.developer-replay{display:grid;grid-template-columns:285px minmax(0,1fr);gap:24px;margin-top:22px}.developer-replay aside button{display:block;width:100%;margin-bottom:9px;overflow-wrap:anywhere}.developer-events{list-style:none;padding:0;margin:0}.developer-events button{display:flex;gap:14px;width:100%;margin-bottom:8px;overflow-wrap:anywhere}.developer-events button>div{min-width:0}.developer-events strong{font-size:13px}.developer-events button>span{font:12px Consolas,monospace}.developer-events small{color:inherit;opacity:.8}@media(max-width:800px){.developer-panel{padding:16px}.developer-replay,.developer-source-columns{grid-template-columns:1fr}.developer-graph{height:350px}.developer-data-flow{grid-template-columns:1fr;gap:8px}.developer-data-flow>span{display:none}.developer-detail{padding:16px}.developer-run-toolbar{align-items:flex-start}}
 .developer-input-inventory{margin:20px 0 22px;padding:17px 18px;border:1px solid #d8e5e0;background:#f7faf8;border-radius:7px}.developer-input-inventory header{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}.developer-input-inventory h3{margin:0;font-size:15px}.developer-input-inventory header p{margin:0;color:#698585;font-size:12px;line-height:1.7}.developer-input-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:13px}.developer-input-cards article{min-width:0;padding:12px 13px;background:#fff;border-left:3px solid #a6c5b8}.developer-input-cards strong{display:block;font-size:13px}.developer-input-cards code{display:inline-block;margin-top:5px;padding:2px 5px;background:#edf4ef;color:#356b59;font-size:11px;overflow-wrap:anywhere}.developer-input-cards p{margin:7px 0 0;color:#526d68;font-size:12px;line-height:1.65}.developer-inline-status{font-size:13px;color:#698585}.developer-inspector-backdrop{position:fixed;z-index:80;inset:0;display:flex;justify-content:flex-end;background:rgba(24,47,49,.32);padding:18px}.developer-inspector{display:flex;flex-direction:column;width:min(880px,100%);height:calc(100vh - 36px);padding:21px 24px;background:#fbfdfb;border-left:4px solid #397b69;box-shadow:-18px 0 42px rgba(22,48,47,.2);border-radius:10px 0 0 10px}.developer-inspector>header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;padding-bottom:15px;border-bottom:1px solid #d4e1dd}.developer-inspector>header span{display:block;margin-bottom:5px;color:#698585;font-size:12px}.developer-inspector>header strong{display:block;overflow-wrap:anywhere;font:600 13px Consolas,monospace}.developer-inspector-close{flex:0 0 auto}.developer-inspector-meta{margin:14px 0 8px;color:#698585;font-size:12px}.developer-inspector pre{flex:1;min-height:0;margin:0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#edf3f1;padding:18px;border-radius:6px;line-height:1.7}.developer-inspector>p{font-size:12px;color:#698585}@media(max-width:800px){.developer-input-cards{grid-template-columns:1fr}.developer-inspector-backdrop{padding:0}.developer-inspector{height:100vh;border-radius:0;padding:17px}}
+.quality-ledger{border:1px solid #d4e1dd;border-radius:10px;background:#fff;padding:24px}.quality-ledger>header,.quality-compare header{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.quality-ledger h2{font:400 26px "KaiTi","STKaiti",serif;margin:6px 0}.quality-ledger header span,.quality-compare header span{font-size:12px;letter-spacing:.1em;color:#397b69}.quality-ledger header p,.quality-compare header p,.quality-run-controls>p{margin:6px 0;color:#698585;font-size:13px;line-height:1.7}.quality-run-controls{margin:22px 0;padding:17px;background:#edf4ef;border-left:3px solid #bb9b52}.quality-run-controls label{display:inline-flex;gap:10px;align-items:center;font-size:13px}.quality-run-controls select,.quality-selects select{border:1px solid #bdd2c8;border-radius:6px;padding:9px 10px;background:#fff;color:#263a40}.quality-run-controls>div{display:inline-flex;gap:8px;margin-left:14px}.quality-run-controls>div button:first-child{background:#397b69;color:#fff}.quality-job{padding:12px 14px;border-radius:6px;background:#eef5f1;color:#356b59;font-size:13px}.quality-job.failed{background:#fff0eb;color:#a33e2a}.quality-cases{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.quality-cases article,.quality-results article{padding:14px;border:1px solid #d8e5e0;border-radius:7px}.quality-cases strong,.quality-results strong{display:block;font-size:14px}.quality-cases span,.quality-results span{display:inline-block;margin-top:7px;font-size:12px}.expect-issue{color:#a45a35}.expect-none{color:#397b69}.quality-cases p,.quality-results p{margin:8px 0 0;color:#526d68;font-size:12px;line-height:1.7}.quality-input-note{padding:8px 10px;background:#fff8e9!important;border-left:2px solid #c6a35c}.quality-cases details,.quality-results details{margin-top:12px;border-top:1px solid #e0ebe6;padding-top:9px}.quality-cases summary,.quality-results summary{cursor:pointer;color:#356b59;font-size:12px}.quality-cases small,.quality-results small{display:block;margin-top:10px;color:#698585}.quality-cases pre,.quality-results pre{max-height:180px;margin:4px 0;padding:9px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f7f5;color:#384f4a;font:12px/1.65 Consolas,monospace}.quality-cases pre.quality-long-article{max-height:360px}.quality-compare{margin-top:24px;padding-top:20px;border-top:1px solid #d4e1dd}.quality-selects{display:flex;gap:9px;align-items:center;margin-top:14px}.quality-selects select{min-width:0;flex:1}.quality-results{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:16px}.quality-side-by-side{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.quality-side-by-side section{min-width:0;padding:9px;background:#f9fbfa}.quality-side-by-side h4{margin:0;color:#356b59;font-size:13px}@media(max-width:800px){.quality-ledger{padding:16px}.quality-ledger>header,.quality-compare header,.quality-selects{display:block}.quality-run-controls>div{margin:12px 0 0}.quality-selects>*{display:block;width:100%;margin:8px 0}.quality-cases,.quality-results,.quality-side-by-side{grid-template-columns:1fr}}
 </style>

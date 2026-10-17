@@ -33,7 +33,7 @@ def verified_requirement_checks(data, candidate, requirements, full_scope=True):
                 if not isinstance(quote, str) or not quote.strip() or quote not in str(candidate.get('chapter_title') or ''):
                     raise ValueError('验收回目引文不在当前候选稿中')
                 continue
-            if type(index) is not int or not 1 <= index <= len(beats) or field not in ('desc', 'name'):
+            if type(index) is not int or not 1 <= index <= len(beats) or field not in ('desc', 'name', 'time'):
                 raise ValueError('验收证据幕号或字段无效')
             # Ignore layout and terminal punctuation, never paraphrase facts.
             normalized = re.sub(r'\s+', '', quote).rstrip('。；;.!！?？') if isinstance(quote,str) else ''
@@ -69,6 +69,26 @@ def verified_continuity_checks(data, candidate):
         probe={**row,'id':'C01'}
         verified_requirement_checks({'requirement_checks':[probe]},candidate,[{'id':'C01'}],full_scope=False)
     return checks
+
+
+def verified_timeline_check(data, candidate):
+    """Verify the model's independent, whole-plan timeline judgment."""
+    row = data.get('timeline_check')
+    beats = candidate.get('beats') or []
+    if not isinstance(row,dict) or row.get('status') not in ('met','unmet','uncertain'):
+        raise ValueError('缺少独立的时间顺序核对结果')
+    if not str(row.get('reason') or '').strip():
+        raise ValueError('时间顺序核对缺少判断依据')
+    if row.get('reviewed_beats') != list(range(1,len(beats)+1)):
+        raise ValueError('时间顺序核对必须覆盖全部候选幕')
+    evidence = row.get('evidence')
+    if not isinstance(evidence,list) or not evidence:
+        raise ValueError('时间顺序核对缺少当前候选依据')
+    probe={**row,'id':'T01','judgment':'present'}
+    verified_requirement_checks({'requirement_checks':[probe]},candidate,[{'id':'T01'}],full_scope=False)
+    if row['status']=='unmet' and not str(row.get('suggestion') or '').strip():
+        raise ValueError('时间顺序冲突缺少可执行补修方向')
+    return row
 
 
 def plan_changes(original, candidate):
@@ -116,12 +136,18 @@ def check_revision(original, candidate, requirements, llm, parse_json,
         notes = []
         checks = verified_requirement_checks(data, candidate, items)
         continuity = verified_continuity_checks(data,candidate)
+        timeline = verified_timeline_check(data,candidate)
         for row in checks + continuity:
             if row['status'] == 'unmet':
                 notes.append({'scope': row.get('id') or '修改影响：'+row['focus'], 'problem':str(row['reason'])[:800],
                               'suggestion':str(row['suggestion'])[:800], 'evidence':row['evidence']})
+        if timeline['status']=='unmet':
+            notes.append({'scope':'时间顺序','problem':str(timeline['reason'])[:800],
+                          'suggestion':str(timeline['suggestion'])[:800], 'evidence':timeline['evidence']})
         if any(row['status'] == 'uncertain' for row in checks + continuity):
             raise ValueError('部分要求无法确认，不自动补修或判定通过')
+        if timeline['status']=='uncertain':
+            raise ValueError('时间顺序依据不足：'+str(timeline['reason'])[:500]+'；保留候选供人工核对')
         if data['requirement_scope']=='content' and not changes['content_changed_beats']:
             notes.insert(0,{'scope':'全章','problem':'分幕内容没有变化，仅改回目或幕名不能落实内容要求。',
                             'suggestion':'针对用户要求改变必要幕的实际事件、人物选择或结果，并同步相关幕。'})
@@ -129,10 +155,12 @@ def check_revision(original, candidate, requirements, llm, parse_json,
             # A deterministic unchanged-content failure can override model pass.
             if not (notes and not changes['content_changed_beats'] and data['requirement_scope']=='content'):
                 raise ValueError('验收总判定与逐项结果不一致')
+        timeline_summary='时间顺序：'+str(timeline['reason'])
         result = {'status':'passed' if not notes else 'needs_review',
-                  'summary':'；'.join((row.get('id') or row['focus']) + '：' + str(row['reason']) for row in checks + continuity)[:800],
+                  'summary':('；'.join((row.get('id') or row['focus']) + '：' + str(row['reason'])
+                                      for row in checks + continuity)+'；'+timeline_summary)[:800],
                   'unresolved':notes,'changes':changes, 'requirement_checks':checks,
-                  'continuity_checks':continuity,
+                  'continuity_checks':continuity, 'timeline_check':timeline,
                   'requirement_scope':data['requirement_scope']}
     except Exception as exc:
         result = {'status':'incomplete','summary':'候选分幕已生成，但自动验收未能确认结果。请人工核对修改是否落实后再保存。',

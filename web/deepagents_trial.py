@@ -14,6 +14,7 @@ from web.chat_artifacts import ARTIFACT_GUIDANCE
 from web.chat_research import ChatResearch, RESEARCH_GUIDANCE
 from web.chat_skills import skill_catalog, read_dialogue_skill
 from web.chat_memory import compact_dialogue_context, read_conversation_turn
+from tools.deepagents.reply_contract import unfulfilled_action_promise
 
 
 def run_trial(config,context,text,guide,backend,emit,running,command=None):
@@ -124,6 +125,8 @@ def run_trial(config,context,text,guide,backend,emit,running,command=None):
                             elapsed_seconds=round(time.monotonic()-started,2))
                 if decision: return {**decision,'message':reply,'_agent_runtime':'deepagents'}
                 if not reply: raise ValueError('Deep Agents 返回了空回复')
+                if unfulfilled_action_promise(reply):
+                    raise ValueError('对话代理表示将执行操作，但未创建操作卡片；本轮未启动任何后台任务，请重试')
                 return {'tool':'reply','chapter':context.get('current_chapter'),'research':[],
                         'message':reply,'_reply_text':reply,'_agent_runtime':'deepagents'}
             elif kind in ('error','eof'):

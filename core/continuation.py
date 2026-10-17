@@ -537,17 +537,36 @@ def translate_query_to_english(llm, text: str, max_chars: int = 300) -> str:
 
 # ----------------------------- 摘要工具 -----------------------------
 
-SUMMARY_PROMPT = """请把下面这段小说正文压缩为不超过 {max_chars} 字的中文剧情摘要。
+DEFAULT_SUMMARY_CHARS = 320
+
+
+SUMMARY_PROMPT = """请把下面这章小说压缩为不超过 {max_chars} 字的中文剧情摘要。
 
 要求：
 1. 只写客观事件和结果，不写修饰语。
 2. 保留人物姓名、关键地点、关键物品。
-3. 时态保持过去式，不评价、不总结。
-4. 不输出 markdown、标题、引号，直接写摘要文本。
-5. 不得猜测或补造未明确出现的咒语、人物状态、死亡、动机或事件原因；不确定则省略。
+3. 必须覆盖章节开端、主要发展和章末状态；存在多条人物线时，每条推动后文的主要线索至少交代一次。
+4. 优先保留改变后续剧情的信息：新发现、决定、冲突结果、未解决问题和人物最后所处状态。
+5. 时态保持过去式，不评价、不总结。
+6. 不输出 markdown、标题、引号，直接写摘要文本。
+7. 不得猜测或补造未明确出现的咒语、人物状态、死亡、动机或事件原因；不确定则省略。
+
+【正文（已按位置标出开端、发展与结尾；标签不是正文）】
+{text}
+"""
+
+
+SUMMARY_REVIEW_PROMPT = """请对照正文检查候选摘要是否遗漏了推动后文的重要内容。
+
+重点检查：章节中段的关键转折、并行人物线、章末新发现、决定、未解决问题和最终状态。
+如果有遗漏，直接补齐并重写；如果没有遗漏，也重新输出候选摘要。最终文本不超过 {max_chars} 字，
+只输出完整的中文剧情摘要，不输出分析、标题、Markdown 或说明，不得补造正文没有的事实。
 
 【正文】
 {text}
+
+【候选摘要】
+{summary}
 """
 
 
@@ -606,28 +625,43 @@ def read_chapter_summary(project_dir: str, chapter_number: int) -> str:
         return None
 
 
+def _summary_excerpt(text: str) -> str:
+    """保留全文或首尾，并显式标出位置，降低模型只概括开头的概率。"""
+    if len(text) <= 6000:
+        third = max(1, len(text) // 3)
+        return (f"【开端】\n{text[:third]}\n\n【发展】\n{text[third:third * 2]}"
+                f"\n\n【结尾】\n{text[third * 2:]}")
+    return (f"【开端】\n{text[:2000]}\n\n【发展】\n{text[len(text)//2-1000:len(text)//2+1000]}"
+            f"\n\n【结尾】\n{text[-2000:]}")
+
+
 def generate_chapter_summary(llm: "ContinuationLLM", chapter_text: str,
-                             max_chars: int = 150) -> str:
+                             max_chars: int = DEFAULT_SUMMARY_CHARS) -> str:
     """让 LLM 把整章正文压缩为 ≤max_chars 字摘要；失败返回空字符串。"""
     if not chapter_text or not chapter_text.strip():
         return ""
     text = chapter_text.strip()
-    # 原著末章常在结尾附有尾声；只取开头会遗漏决定续写时间线的关键信息。
-    excerpt = text if len(text) <= 6000 else text[:3000] + "\n\n【章节结尾】\n" + text[-3000:]
+    # Respect explicit small limits used by callers/tests; the product default is
+    # deliberately larger, but normalization must still honour a configured cap.
+    max_chars = max(20, int(max_chars or DEFAULT_SUMMARY_CHARS))
+    excerpt = _summary_excerpt(text)
     prompt = SUMMARY_PROMPT.format(max_chars=max_chars, text=excerpt)
     try:
+        draft = ""
         for attempt in range(2):
-            request = prompt if not attempt else (
-                "上次摘要无效。请只输出完整的中文剧情摘要，必须以完整句号结束，"
-                "不要输出分析、思考过程、标题或 Markdown。\n\n" + prompt)
+            request = prompt if not attempt else SUMMARY_REVIEW_PROMPT.format(
+                max_chars=max_chars, text=excerpt, summary=draft)
             raw = llm.complete(
                 request, system="你是小说编辑，只输出中文剧情摘要，不输出思考过程。",
                 temperature=0.3 if not attempt else 0.1,
                 num_predict=max_chars * 3, disable_thinking=True)
             summary = _normalize_chapter_summary(raw, max_chars)
-            if not validate_chapter_summary(summary):
-                return summary
-        return ""
+            if validate_chapter_summary(summary):
+                if attempt == 0:
+                    continue
+                return draft
+            draft = summary
+        return draft
     except Exception as e:
         logging = __import__("logging")
         logging.warning("生成章节摘要失败：%s", e)
@@ -741,7 +775,8 @@ def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
 
     # 是否启用前章摘要
     summary_enabled = bool(settings.get("use_previous_summaries", True))
-    summary_max_chars = int(settings.get("summary_chars", 150) or 150)
+    summary_max_chars = int(settings.get("summary_chars", DEFAULT_SUMMARY_CHARS)
+                            or DEFAULT_SUMMARY_CHARS)
 
     # 一次性补齐缺失的最近几章摘要
     previous = []
@@ -1064,11 +1099,14 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
                          chapter_goal: str, audit=None, project_dir=None,
                          chapter_number=None, progress=None, creative_request='') -> list[dict]:
     """让独立审查轮只找问题，不让它一边批评一边重写。"""
-    from core.plan_evidence import evidence_sources, verify_issue
+    from core.plan_evidence import evidence_sources, verify_issue, continuity_state_records
     sources = evidence_sources(previous_context[:7500], wiki_history[:1800], draft)
-    if creative_request:
-        sources.append({'id':'U01','kind':'user_request','label':'本次创作目标（不是历史证据）',
-                        'text':creative_request})
+    state_records = continuity_state_records(wiki_history[:1800])
+    from core.plan_review_check import creative_requirement_items
+    requirement_items = creative_requirement_items(creative_request)
+    for requirement in requirement_items:
+        sources.append({'id':requirement['id'],'kind':'user_request',
+                        'label':'本次创作目标（不是历史证据）','text':requirement['text']})
     from core.agent_skill import skill_guidance
     guidance = skill_guidance("chapter-planning", "review", audit, "review")
     prompt = f"""{guidance}
@@ -1077,6 +1115,10 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
 {chapter_goal or '承接上一章，自然推进情节'}
 【本次原始创作要求】
 {creative_request or '（无额外本次要求）'}
+【程序登记的创作目标编号】
+{json.dumps(requirement_items, ensure_ascii=False)}
+【结构化连续性状态｜用于区分人物、物件状态和未确认关系】
+{json.dumps(state_records, ensure_ascii=False)}
 【分类证据目录｜逐条引用对应来源编号】
 {json.dumps(sources, ensure_ascii=False)}
 本次审查恰好包含 {num_beats} 幕；只返回本步骤的 JSON 审查结果。"""
@@ -1143,6 +1185,8 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
     """重写后只做验收，避免审查意见在改写过程中被解决一半或引入新问题。"""
     from core.agent_skill import skill_guidance
     guidance = skill_guidance("chapter-planning", "acceptance", audit, "acceptance")
+    from core.plan_review_check import creative_requirement_items
+    requirement_items = creative_requirement_items(creative_request)
     prompt = f"""{guidance}
 
 【近期连续性上下文】
@@ -1153,6 +1197,8 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
 {json.dumps(review_issues, ensure_ascii=False)}
 【本次原始创作要求，须同时验收】
 {creative_request or '（无额外本次要求）'}
+【程序登记的创作目标编号】
+{json.dumps(requirement_items, ensure_ascii=False)}
 【重写稿】
 {json.dumps(rewritten, ensure_ascii=False)}
 
@@ -1205,6 +1251,8 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     """为新章提出回目和分幕；只返回建议，不自动覆盖已保存计划。"""
     settings = {**settings, '_planning_mode':'rebuild'}
     creative_request = current_creation_request(settings)
+    from core.plan_evidence import continuity_state_records
+    continuity_records = continuity_state_records(wiki_history[:2200])
     def run_stage(name, function, *args, **kwargs):
         if stage_runner:
             return stage_runner(name, lambda: function(*args, **kwargs))
@@ -1219,6 +1267,8 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {previous_context[:7500] or '（未提供）'}
 【最近 Wiki 原文依据】
 {wiki_history[:2200] or '（未提供）'}
+【结构化连续性状态｜人物、物件及关系的已知边界】
+{json.dumps(continuity_records, ensure_ascii=False)}
 【本章目标】
 {settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
 {planning_input_prompt(settings)}
@@ -1368,6 +1418,31 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                 if audit:
                     audit.write("local_patch_applied", fixed_issues=acceptance_issues,
                                 editorial_notes=editorial_notes)
+                if progress:
+                    progress("正在最终复核局部修补后的完整规划")
+                final_review = run_stage("final_review", _review_chapter_plan,
+                    llm, data, num_beats, previous_context, wiki_history,
+                    settings.get("chapter_brief", ""), audit=audit,
+                    project_dir=project_dir, chapter_number=settings.get("chapter_number"),
+                    progress=progress, creative_request=creative_request)
+                final_substantive = [item for item in final_review
+                                     if item.get("severity") in {"high", "medium"}
+                                     and item.get("evidence_verified")]
+                all_editorial_notes.extend(dict(item, review_stage="final_review")
+                    for item in final_review if item.get("severity") == "low"
+                    or not item.get("evidence_verified"))
+                if any(item.get("check_failed") for item in final_review):
+                    validation_status = "incomplete"
+                elif final_substantive:
+                    validation_status = "needs_review"
+                    all_editorial_notes.extend(dict(item, review_stage="final_review")
+                                               for item in final_substantive)
+                    if progress:
+                        progress(f"最终复核仍发现 {len(final_substantive)} 个剧情问题；候选保留供人工核对")
+                else:
+                    validation_status = "passed"
+                    if progress:
+                        progress("局部修补后的最终复核通过")
             except ValueError as exc:
                 if stage_runner:
                     raise
@@ -1483,7 +1558,15 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     original_plan = {'chapter_title':current['title'],'beats':current_beats}
     candidate = None
     acceptance = None
-    for attempt in range(2):
+    # Initial revision plus at most two bounded repairs. The second repair is
+    # especially useful when requirement acceptance prompted a good content
+    # change but that repair introduced a deterministic schema/shape error.
+    # Semantic timeline ordering belongs to the model acceptance judgment,
+    # not date-token sorting here. Each repair receives the
+    # exact latest validation findings and starts from the latest valid
+    # candidate, never silently from the saved draft.
+    max_generation_attempts = 3
+    for attempt in range(max_generation_attempts):
         data = None
         repair_prompt = prompt
         if attempt and candidate:
@@ -1500,7 +1583,8 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         if audit:
             audit.write("model_request", stage="user_plan_revision", attempt=attempt + 1, prompt=request)
         if progress:
-            progress('正在按用户问题修订分幕' if attempt == 0 else '正在定向补修未落实要求（最多一次）')
+            progress('正在按用户问题修订分幕' if attempt == 0 else
+                     f'正在按验收结果定向补修（第 {attempt}/{max_generation_attempts - 1} 次）')
         raw = llm.complete(
             request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
             temperature=0.3 if attempt == 0 else 0.1,
@@ -1524,7 +1608,11 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                                for n in acceptance['unresolved']]
                 if progress:
                     progress('要求尚未落实：'+ '；'.join(n['problem'] for n in acceptance['unresolved'])[:500])
-                if attempt == 1: break
+                # One semantic repair is enough: repeatedly asking the same
+                # judge/model pair to satisfy an unmet creative requirement is
+                # unlikely to add value. Reserve the third generation only for
+                # deterministic JSON/schema errors introduced by that repair.
+                if attempt >= 1: break
             data = None
         except ValueError as exc:
             data = None

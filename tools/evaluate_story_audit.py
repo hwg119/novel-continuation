@@ -10,12 +10,48 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
+def validate_case(case):
+    """Keep the human-authored regression suite explicit and safe to send live."""
+    required = ("id", "dimension", "previous", "text", "expected", "requires_issue", "screen")
+    missing = [key for key in required if key not in case]
+    if missing:
+        raise ValueError(f"用例缺少字段：{case.get('id', '<unknown>')} · {', '.join(missing)}")
+    if not isinstance(case["requires_issue"], bool):
+        raise ValueError(f"requires_issue 必须是布尔值：{case['id']}")
+    if not all(isinstance(case[key], str) and case[key].strip()
+               for key in ("id", "dimension", "previous", "text", "expected")):
+        raise ValueError(f"用例文字字段无效：{case['id']}")
+    screen = case["screen"]
+    if not isinstance(screen, dict) or not all(isinstance(screen.get(key, []), list)
+                                               for key in ("must_mention_any", "must_not_mention_any")):
+        raise ValueError(f"screen 格式无效：{case['id']}")
+    if not all(isinstance(word, str) and word.strip()
+               for words in screen.values() if isinstance(words, list) for word in words):
+        raise ValueError(f"screen 信号必须是非空文字：{case['id']}")
+
+
+def screen_result(case, result):
+    """Cheap signal screen, deliberately not a substitute for editorial judgment."""
+    requirements = str(result.get("revision_requirements") or "").strip()
+    searchable = "\n".join(str(result.get(key) or "") for key in
+                             ("revision_requirements", "story_details", "story_summary", "report"))
+    required = case["screen"]["must_mention_any"]
+    forbidden = case["screen"]["must_not_mention_any"]
+    missing = required if case["requires_issue"] and required and not any(word in searchable for word in required) else []
+    unexpected = [word for word in forbidden if word in searchable]
+    return {
+        "issue_presence_matches": bool(requirements) == case["requires_issue"],
+        "missing_expected_signals": missing,
+        "unexpected_signals": unexpected,
+        "passed": bool(requirements) == case["requires_issue"] and not missing and not unexpected,
+        "human_review_required": True,
+    }
+
+
 def evaluate_case(case, result):
-    """Check output shape only; semantic accuracy remains explicit human review."""
-    found = bool(result.get("revision_requirements", "").strip())
-    return {"case": case["id"], "expected": case["expected"],
-            "issue_presence_matches": found == case["requires_issue"],
-            "semantic_review_required": True, "result": result}
+    """Report machine signals and preserve the full output for human scoring."""
+    return {"case": case["id"], "dimension": case["dimension"], "expected": case["expected"],
+            "screening": screen_result(case, result), "semantic_review_required": True, "result": result}
 
 
 def expand_case(case):
@@ -38,29 +74,40 @@ def expand_case(case):
     return before
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live", action="store_true", help="允许发送合成样本给配置模型")
-    parser.add_argument("--model-config", default="deepseek-flash")
-    parser.add_argument("--long", action="store_true", help="相同事实加入无关场景，测试长上下文")
-    args = parser.parse_args()
-    if not args.live:
-        parser.error("必须显式传入 --live；默认不调用模型")
+def load_cases():
+    """Read and validate the deliberately synthetic suite."""
+    cases = json.loads((ROOT / "tools/deepagents/fixtures/story_audit_cases.json").read_text(encoding="utf-8"))
+    for case in cases:
+        validate_case(case)
+    return cases
+
+
+def run_live_suite(model_config="deepseek-flash", long=False, progress=None):
+    """Run the suite only when a caller has explicitly requested a live evaluation.
+
+    ``progress`` intentionally receives metadata only; raw synthetic prompts stay in
+    the local JSONL artifacts so the web UI never needs to replay them.
+    """
     from core.config_manager import load_config, get_llm_config
     from core.plan_run_log import PlanRunLogger
     from core.story_review import check_story
-    config = get_llm_config(load_config(str(ROOT / "config.json")), args.model_config)
-    cases = json.loads((ROOT / "tools/deepagents/fixtures/story_audit_cases.json").read_text(encoding="utf-8"))
-    if args.long:
+
+    cases = load_cases()
+    config = get_llm_config(load_config(str(ROOT / "config.json")), model_config)
+    if not config.get("model_name"):
+        raise ValueError(f"未找到模型配置：{model_config}")
+    if long:
         cases = [expand_case(case) for case in cases]
-    # Inputs contain only synthetic fiction; isolate artifacts from real projects.
     directory = ROOT / 'workspace/agent_trials' / ('story_audit_' + datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:8])
     directory.mkdir(parents=True)
-    print(f'Logs: {directory}', flush=True)
-    for case in cases:
+    reports = []
+    for index, case in enumerate(cases, 1):
+        if progress:
+            progress(f"正在评测 {index}/{len(cases)}：{case['dimension']}",
+                     {"case": case["id"], "dimension": case["dimension"], "index": index, "total": len(cases)})
         audit = PlanRunLogger(str(directory), case["id"], config.get("model_name", ""),
                               2, secrets=(config.get("api_key", ""),))
-        audit.write('regression_input', case=case['id'], variant='long' if args.long else 'short',
+        audit.write('regression_input', case=case['id'], variant='long' if long else 'short',
                     text=case['text'], previous=case['previous'],
                     text_chars=len(case['text']), previous_chars=len(case['previous']))
         result = check_story(case["text"], {}, "", config,
@@ -68,7 +115,30 @@ def main():
                              project_dir=str(directory), chapter_number=2)
         report = evaluate_case(case, result)
         audit.write('regression_result', **report)
-        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        reports.append(report)
+    return {"run_id": directory.name, "cases": len(reports), "variant": "long" if long else "short",
+            "screened_passes": sum(1 for report in reports if report["screening"]["passed"]),
+            "human_review_required": True}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true", help="允许发送合成样本给配置模型")
+    parser.add_argument("--model-config", default="deepseek-flash")
+    parser.add_argument("--long", action="store_true", help="相同事实加入无关场景，测试长上下文")
+    parser.add_argument("--validate", action="store_true", help="只校验用例结构，不调用模型")
+    args = parser.parse_args()
+    cases = load_cases()
+    if args.validate:
+        print(json.dumps({"suite": "story-audit", "cases": len(cases),
+                          "dimensions": sorted({case["dimension"] for case in cases}),
+                          "model_called": False}, ensure_ascii=False, indent=2))
+        return
+    if not args.live:
+        parser.error("必须显式传入 --live；默认不调用模型。可使用 --validate 校验用例。")
+    report = run_live_suite(args.model_config, args.long,
+                            lambda message, _: print(message, flush=True))
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":

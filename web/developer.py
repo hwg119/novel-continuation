@@ -189,7 +189,51 @@ def redactor(config):
     return redact
 
 
-def register_developer(app, project_path, config_path):
+def quality_root(create=False):
+    """The quality suite has a separate, synthetic-only artifact boundary."""
+    root = (ROOT / 'workspace' / 'agent_trials').resolve()
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def quality_run(name):
+    if not re.fullmatch(r'story_audit_[A-Za-z0-9_]+', name):
+        raise HTTPException(400, '质量评测编号无效')
+    path = (quality_root() / name).resolve()
+    if not path.is_relative_to(quality_root()) or not (path / 'runs' / 'plan_logs').is_dir():
+        raise HTTPException(404, '质量评测不存在')
+    return path
+
+
+def quality_detail(name):
+    """Return only synthetic inputs and model reports from one bounded trial."""
+    path = quality_run(name)
+    rows = {}
+    for item in sorted((path / 'runs' / 'plan_logs').glob('*.jsonl')):
+        if item.stat().st_size > 5_000_000:
+            continue
+        records = []
+        for line in item.read_text(encoding='utf-8').splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                records.append(row)
+        supplied = next((row for row in records if row.get('event') == 'regression_input'), {})
+        report = next((row for row in reversed(records) if row.get('event') == 'regression_result'), {})
+        rows[item.stem] = {
+            'previous': str(supplied.get('previous') or ''),
+            'text': str(supplied.get('text') or ''),
+            'variant': supplied.get('variant'),
+            'result': report.get('result') if isinstance(report.get('result'), dict) else {},
+            'screening': report.get('screening') if isinstance(report.get('screening'), dict) else {},
+        }
+    return rows
+
+
+def register_developer(app, project_path, config_path, jobs):
     @app.get('/api/developer/map')
     def get_map(): return architecture()
 
@@ -230,3 +274,69 @@ def register_developer(app, project_path, config_path):
         text=json.dumps(record,ensure_ascii=False,indent=2)
         return {'text':text[:160000], 'truncated':len(text)>160000, 'total_chars':len(text),
                 'warning':'已隐藏已配置密钥和常见凭证；小说及其他个人内容仍可能存在，分享前请检查。'}
+
+    @app.get('/api/developer/quality/cases')
+    def get_quality_cases():
+        from tools.evaluate_story_audit import expand_case, load_cases
+        cases = load_cases()
+        fixture = ROOT / 'tools' / 'deepagents' / 'fixtures' / 'story_audit_cases.json'
+        def full_input(item):
+            return '【前章材料】\n' + item['previous'] + '\n\n【待审文章】\n' + item['text']
+        return {'suite': 'story-audit', 'fixture_version': hashlib.sha256(fixture.read_bytes()).hexdigest()[:12],
+                'cases': [{'id': item['id'], 'dimension': item['dimension'], 'expected': item['expected'],
+                           'previous': item['previous'], 'text': item['text'],
+                           'short_article': full_input(item), 'long_article': full_input(expand_case(item)),
+                           'requires_issue': item['requires_issue']} for item in cases],
+                'boundary': '固定合成文本；不会读取、发送或修改任何小说章节。'}
+
+    @app.get('/api/developer/quality/models')
+    def get_quality_models():
+        from core.config_manager import load_config
+        config = load_config(str(config_path))
+        names = sorted(str(name) for name, value in config.get('llm_configs', {}).items()
+                       if isinstance(value, dict) and value.get('model_name'))
+        return {'models': names, 'default': config.get('default_llm_config_name') if config.get('default_llm_config_name') in names else (names[0] if names else None)}
+
+    @app.get('/api/developer/quality/runs')
+    def get_quality_runs():
+        from tools.compare_quality_runs import summarize
+        items = []
+        root = quality_root()
+        if not root.is_dir():
+            return []
+        for path in root.glob('story_audit_*'):
+            if not path.is_dir() or not re.fullmatch(r'story_audit_[A-Za-z0-9_]+', path.name):
+                continue
+            try:
+                summary = summarize(quality_run(path.name))
+            except (OSError, ValueError):
+                continue
+            items.append({'id': path.name, 'modified_at': path.stat().st_mtime, 'cases': len(summary),
+                          'variants': sorted({str(row.get('variant') or '未知') for row in summary.values()}),
+                          'screened_passes': sum(bool(row.get('screening', {}).get('passed')) for row in summary.values())})
+        return sorted(items, key=lambda item: item['modified_at'], reverse=True)[:60]
+
+    @app.get('/api/developer/quality/runs/compare')
+    def compare_quality_runs(left: str, right: str):
+        from tools.compare_quality_runs import compare
+        return {**compare(quality_run(left), quality_run(right)),
+                'details': {'left': quality_detail(left), 'right': quality_detail(right)}}
+
+    @app.post('/api/projects/{project_id}/developer/quality/runs')
+    def start_quality_run(project_id: str, payload: dict,
+                          marker: str | None = Header(None, alias='X-Novel-Workbench')):
+        if marker != '1':
+            raise HTTPException(403, '请从开发者页面主动启动质量评测')
+        model_config = str(payload.get('model_config') or 'deepseek-flash').strip()
+        long = bool(payload.get('long'))
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', model_config):
+            raise HTTPException(400, '模型配置名称无效')
+        from tools.evaluate_story_audit import run_live_suite
+
+        def work(update):
+            update('正在校验合成用例；不会读取小说正文', {'variant': 'long' if long else 'short'})
+            return run_live_suite(model_config, long, update)
+        try:
+            return jobs.start(project_path(project_id), 'quality_regression', work)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))

@@ -78,7 +78,9 @@ def build_agent(model, system_prompt, call, callback=None):
         '旧助手结论只是待核对意见，不是证据；重新评估既不要求赞同旧结论，也不要求找出新问题。'
         '结合完整对话判断承接关系和实际目标，requirements 必须是自包含、具体的业务操作要求，'
         '包含用户确认采用的前文建议与补充限制。用户的确认、评价和版本选择不是创作内容指令；'
-        '上下文不足以确定目标时才追问。每次只提出一个操作；提出成功后简短说明等待执行。不要输出路由 JSON。'
+        '上下文不足以确定目标时才追问。每次只提出一个操作；提出成功后简短说明已生成操作卡片、等待用户执行。'
+        '只要答复表示“现在提交、开始修改、请稍候”等即将执行的含义，就必须在同一轮调用 propose_action；'
+        '没有调用工具时只能说明建议或缺少的信息，严禁用将来时伪装成正在后台执行。不要输出路由 JSON。'
         '展示协议：内部分析、英文规划草稿、自我讨论和工具选择推演不要放进回复正文。'
         '最终给用户的答复使用用户语言，放在唯一的 <final>...</final> 中；其中可用 Markdown。'
         '工具调用阶段不输出最终答复。仅报告简洁结论、必要依据和可执行建议，不展示思考过程。',
@@ -116,11 +118,22 @@ def run(request, model=None, call=None):
     logger=Logs()
     logger.raise_error=True
     agent=build_agent(model,request['system_prompt'],call or rpc)
+    invocation={'recursion_limit':16,'callbacks':[logger]}
     result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
-        '\n【本次用户消息】\n'+request['text']}]},config={'recursion_limit':16,'callbacks':[logger]})
+        '\n【本次用户消息】\n'+request['text']}]},config=invocation)
     message=result['messages'][-1]
     from tools.deepagents.reply_display import public_reply
+    from tools.deepagents.reply_contract import unfulfilled_action_promise
     reply=public_reply(message.content)
+    if unfulfilled_action_promise(reply):
+        # Give the model one chance to honor the operation contract. This keeps
+        # intent resolution with the model instead of hard-coding chapter rules.
+        result=agent.invoke({'messages':result['messages']+[{'role':'user','content':
+            '系统校验：上一条最终答复承诺即将执行操作，但没有调用 propose_action。'
+            '请根据本次用户要求现在调用该工具；若不能执行，请明确说明缺少什么，不要让用户等待。'}]},
+            config=invocation)
+        message=result['messages'][-1]
+        reply=public_reply(message.content)
     if not reply:
         raise ValueError('模型未返回可展示的正式答复，请重试')
     return {'reply':reply,'model_calls':logger.calls}

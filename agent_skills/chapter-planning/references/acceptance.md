@@ -4,7 +4,7 @@
 
 对每个带 issue_id 的初审问题输出 checked_issues：[{"issue_id":"原编号","resolved":true,"change":"具体哪幕改变了什么，如何解决原问题"}]。重复问题要说明新增变化，因果问题要说明新增关联依据或如何收回过强结果；换形容词不算解决。resolved=false 的项目同时进入 unresolved，保留同一 issue_id；不能漏项后宣布通过。没有编号的旧记录按原方式验收。
 
-同时验收本次原始创作要求，输出 requirement_checks：[ {"requirement":"本次要求中的连续短原句","met":true,"evidence":"具体幕的事件、选择或后果如何落实","plan_quote":"重写稿中的连续短原句","suggestion":"未落实时的调整方向"} ]。覆盖实际目标，不以初审问题解决代替目标达成；增强波澜/推进不能仅靠限定措辞或解释。没有本次要求输出 []。met=false 必须说明补修方向，程序会记为未解决目标。无需重复列入 unresolved。
+同时验收程序登记的完整创作目标，输出 requirement_checks：[ {"id":"U01","met":true,"evidence":"完整目标在具体幕中的事件、选择或后果如何落实","plan_citations":[{"source_id":"P01","quote":"重写稿中的连续短原句"}],"suggestion":"未落实时的调整方向"} ]。按给定 id 返回，不复述、拆分或改名目标；met=true 必须引用重写稿，涉及多幕时分别引用，U01 用户要求原文不能充当落实证据；met=false 时有冲突内容就引用，要求的事情完全未出现则 plan_citations 为空数组并在 evidence 说明缺失；不以初审问题解决代替目标达成；增强波澜/推进不能仅靠限定措辞或解释。没有登记目标时输出 []。met=false 必须说明补修方向，程序会记为未解决目标。无需重复列入 unresolved。
 
 场景内容在结尾状态中被概括不是剧情重复；不得因此要求加入额外事件。
 

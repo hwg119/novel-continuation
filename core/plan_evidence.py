@@ -35,6 +35,33 @@ def evidence_sources(context, wiki, plan):
     return sources
 
 
+def continuity_state_records(wiki):
+    """Expose Wiki facts as fields so the reviewer need not infer record roles from prose."""
+    records = []
+    for source in evidence_sources('', wiki, {}):
+        text = source['text']
+        parts = [part.strip() for part in text.split('｜') if part.strip()]
+        chapter_scope = parts[0] if parts else ''
+        fact = parts[1] if len(parts) > 1 else ''
+        subject_predicate, _, statement = fact.partition('：')
+        subject, _, predicate = subject_predicate.rpartition('·')
+        if not subject:
+            subject, predicate = subject_predicate, ''
+        usage = next((part.removeprefix('适用：').strip() for part in parts
+                      if part.startswith('适用：')), '')
+        records.append({
+            'source_id': source['id'],
+            'record_type': ('state' if '近期状态' in chapter_scope else
+                            'event' if '已发生事件' in chapter_scope else 'reference'),
+            'chapter_scope': chapter_scope,
+            'subject': subject,
+            'predicate': predicate,
+            'statement': statement,
+            'usage': usage,
+        })
+    return records
+
+
 def verify_issue(item, sources):
     def normalized(value):
         return re.sub(r"\s+", "", str(value)).replace("“", '"').replace("”", '"')

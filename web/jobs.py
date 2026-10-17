@@ -19,7 +19,7 @@ class JobCancelled(Exception):
     """Cooperative stop at a task's progress boundary."""
 
 
-CANCELLABLE_KINDS = {'plan', 'plan_revision', 'revise', 'consistency'}
+CANCELLABLE_KINDS = {'plan', 'plan_revision', 'revise', 'consistency', 'quality_regression'}
 
 
 def resumable_checkpoint(project_dir, job):
