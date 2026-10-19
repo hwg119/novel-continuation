@@ -18,3 +18,5 @@ high：时间线、人物状态、信息权限或关键因果不能成立。medi
 
 输出 JSON：{"issues":[{"severity":"high或medium或low","category":"repetition / progression / causality / continuity / editorial","scope":"涉及的幕","problem":"具体问题及依据","impact":"故事受到的影响","missing_link":"缺失变化或关联，无则空","citations":[{"source_id":"证据目录编号","quote":"连续短原句"},{"source_id":"对应规划编号","quote":"连续短原句"}],"suggestion":"最小调整方式"}],"uncertainties":[]}。
 high/medium 至少两段准确原句。U01 是本次要求，只能支持目标验收，不支持历史事实判断。没有充分依据的问题输出空数组；不要为了给建议而泛泛挑错。上述 JSON 顶层同时包含 "requirement_checks":[{"id":"U01","met":true,"evidence":"完整目标在各幕中的具体落实效果","plan_citations":[{"source_id":"P01","quote":"候选规划中的连续短原句"}],"suggestion":""}]。
+
+结果保持紧凑：最多输出 4 个真正影响续写的问题；problem、impact、missing_link 和 suggestion 各自只写不重复的一层信息，不逐幕复述整份规划。每个问题引用满足判断所需的最少原句，避免同一事实重复引用。requirement_checks 的 evidence 概括整体落实情况，不逐幕重写规划内容。

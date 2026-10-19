@@ -6,6 +6,34 @@ import uuid
 from pathlib import Path
 from typing import Literal
 RPC_LOCK=threading.Lock()
+HARNESS_REGISTERED=False
+
+
+def model_request_options(cfg):
+    """Provider-compatible options for the tool-calling dialogue model."""
+    name=str(cfg.get('model_name') or '').lower()
+    mode=str(cfg.get('thinking_mode') or 'auto').lower()
+    if mode=='provider_default':
+        extra={}
+    elif name.startswith(('qwen3.5-','qwen3.6-','qwen3.7-','qwen3.8-','deepseek-v4')):
+        extra={'enable_thinking':False}
+    else:
+        # Auto mode deliberately tries the common OpenAI-compatible control
+        # for unknown models too. Explicit unsupported-parameter responses
+        # are retried without it by run(), so new models do not require a
+        # name allowlist and strict providers keep working.
+        extra={'thinking':{'type':'disabled'}}
+    configured=int(cfg.get('max_tokens') or 2400)
+    return extra, min(max(configured,1600),4096)
+
+
+def unsupported_thinking_parameter(exc):
+    message=str(exc or '').lower()
+    parameter=any(marker in message for marker in ('thinking','enable_thinking','reasoning'))
+    unsupported=any(marker in message for marker in (
+        'unknown','unrecognized','unsupported','not supported','invalid parameter',
+        'extra fields','extra_forbidden','unexpected keyword'))
+    return parameter and unsupported
 
 
 def friendly_model_error(exc):
@@ -41,9 +69,12 @@ def build_agent(model, system_prompt, call, callback=None):
     from deepagents import create_deep_agent, register_harness_profile, HarnessProfile, GeneralPurposeSubagentProfile
     from langchain_core.tools import tool
     # Trial exposes project-scoped tools, not a host filesystem or subagents.
-    register_harness_profile('openai',HarnessProfile(
-        excluded_tools={'ls','read_file','write_file','edit_file','glob','grep'},
-        general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
+    global HARNESS_REGISTERED
+    if not HARNESS_REGISTERED:
+        register_harness_profile('openai',HarnessProfile(
+            excluded_tools={'ls','read_file','write_file','edit_file','glob','grep'},
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
+        HARNESS_REGISTERED=True
 
     @tool
     def load_skill(name:str, reference:str|None=None) -> dict:
@@ -105,21 +136,23 @@ def run(request, model=None, call=None):
     from langchain_core.callbacks import BaseCallbackHandler
     from langchain_openai import ChatOpenAI
     cfg=request['config']
-    if model is None:
+    managed_model=model is None
+    if managed_model:
         fmt=str(cfg.get('interface_format') or '').lower()
-        extra={}
-        name=str(cfg.get('model_name') or '').lower()
-        if fmt=='deepseek' or name=='deepseek-flash': extra={'thinking':{'type':'disabled'}}
+        extra,max_tokens=model_request_options(cfg)
         sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
         from llm_adapters import check_base_url
         # Do not infer capability from a provider label. Ollama and other local
         # servers can expose a valid OpenAI-compatible tools endpoint; let the
         # actual request establish support and report the provider error if not.
         api_key=cfg.get('api_key') or ('ollama' if fmt=='ollama' else None)
-        model=ChatOpenAI(model=cfg['model_name'],api_key=api_key,base_url=check_base_url(cfg.get('base_url') or '') or None,
-            temperature=0.1,max_tokens=1600,timeout=min(int(cfg.get('timeout') or 180),180),
-            max_retries=0,extra_body=extra or None,use_responses_api=False,
-            stream_usage=False)
+        def configured_model(body):
+            return ChatOpenAI(model=cfg['model_name'],api_key=api_key,
+                base_url=check_base_url(cfg.get('base_url') or '') or None,
+                temperature=0.1,max_tokens=max_tokens,timeout=min(int(cfg.get('timeout') or 180),180),
+                max_retries=0,extra_body=body or None,use_responses_api=False,
+                stream_usage=False)
+        model=configured_model(extra)
     class Logs(BaseCallbackHandler):
         calls=0
         def on_chat_model_start(self,serialized,messages,**kwargs):
@@ -139,7 +172,17 @@ def run(request, model=None, call=None):
         result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
             '\n【本次用户消息】\n'+request['text']}]},config=invocation)
     except Exception as exc:
-        raise ValueError(friendly_model_error(exc)) from exc
+        if managed_model and extra and unsupported_thinking_parameter(exc):
+            send({'type':'progress','text':'当前接口不支持思考控制参数，已采用接口默认模式重试',
+                  'details':{'event':'thinking_control_fallback','parameters':list(extra)}})
+            agent=build_agent(configured_model({}),request['system_prompt'],call or rpc)
+            try:
+                result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
+                    '\n【本次用户消息】\n'+request['text']}]},config=invocation)
+            except Exception as retry_exc:
+                raise ValueError(friendly_model_error(retry_exc)) from retry_exc
+        else:
+            raise ValueError(friendly_model_error(exc)) from exc
     message=result['messages'][-1]
     from tools.deepagents.reply_display import public_reply
     from tools.deepagents.reply_contract import unfulfilled_action_promise
@@ -152,6 +195,20 @@ def run(request, model=None, call=None):
                 '系统校验：上一条最终答复承诺即将执行操作，但没有调用 propose_action。'
                 '请根据本次用户要求现在调用该工具；若不能执行，请明确说明缺少什么，不要让用户等待。'}]},
                 config=invocation)
+        except Exception as exc:
+            raise ValueError(friendly_model_error(exc)) from exc
+        message=result['messages'][-1]
+        reply=public_reply(message.content)
+    if not reply:
+        # Some OpenAI-compatible reasoning models can still ignore the
+        # disable-thinking flag or finish at the token limit inside <think>.
+        # Preserve model-led intent resolution, but ask once for the missing
+        # public/tool response instead of surfacing a misleading empty reply.
+        try:
+            result=agent.invoke({'messages':result['messages']+[{'role':'user','content':
+                '系统校验：上一轮只返回了内部思考或在正式答复前被截断。'
+                '不要继续分析，不要输出 <think>。若用户要求执行，请立即调用唯一必要的工具；'
+                '否则直接在唯一的 <final>...</final> 中给出简洁中文答复。'}]},config=invocation)
         except Exception as exc:
             raise ValueError(friendly_model_error(exc)) from exc
         message=result['messages'][-1]

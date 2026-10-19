@@ -70,7 +70,17 @@ uncertainties 只保留影响关键事实或修补决定的未知；资料未穷
         try:
             data = parse(raw)
         except (ValueError, TypeError) as exc:
-            raise ValueError("审查模型返回非空内容，但未能解析审查 JSON") from exc
+            if not last:
+                message = str(exc).replace("\n", " ")[:800]
+                history.append({"schema_validation_error": message,
+                                "instruction": "请按原定 JSON 结构从头返回完整结果"})
+                if progress:
+                    progress("审查结果结构不完整，正在携带校验错误自动重试")
+                if audit:
+                    audit.write("research_schema_retry", turn=turn + 1,
+                                error=message, next_turn=turn + 2)
+                continue
+            raise ValueError("审查模型返回非空内容，但未能通过结构校验") from exc
         if data.get("action") not in {"lookup", "investigate"}:
             if not isinstance(data.get("issues"), list):
                 raise ValueError("主动审查未返回 issues 数组")

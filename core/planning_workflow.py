@@ -74,8 +74,16 @@ def run_planning_workflow(project_dir, thread_id, model, update, audit, initial=
                           next((row.get("problem") for row in result
                                 if isinstance(row, dict) and row.get("check_failed")), None)
                           if isinstance(result, list) else None)
-                if failed:
+                # Review/acceptance are quality gates around an already valid
+                # candidate. A provider formatting failure must be visible in
+                # validation_status/logs, but must not discard the candidate or
+                # turn the whole planning job into a failure.
+                advisory_gate = name in {"review", "acceptance", "final_review"}
+                if failed and not advisory_gate:
                     raise ValueError(str(failed))
+                if failed and advisory_gate:
+                    audit.write("quality_gate_incomplete", stage=name,
+                                warning=str(failed), candidate_preserved=True)
             except Exception as exc:
                 optional = name in {"editorial_patch", "acceptance_editorial_patch"}
                 audit.write("optional_node_failed" if optional else "node_failed",

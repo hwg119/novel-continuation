@@ -31,7 +31,7 @@ const interfaceOptions = computed(() => group.value === 'llm_configs'
       '本地bge', '离线哈希'])
 const targetName = computed(() => mode.value === 'new' ? newName.value.trim() : editName.value.trim())
 
-function select(name: string) { mode.value = 'edit'; selected.value = name; editName.value = name; draft.value = { ...(config.value?.[group.value]?.[name] || {}) }; draft.value.api_key = '' }
+function select(name: string) { mode.value = 'edit'; selected.value = name; editName.value = name; draft.value = { ...(config.value?.[group.value]?.[name] || {}) }; draft.value.api_key = ''; if (group.value === 'llm_configs' && !draft.value.thinking_mode) draft.value.thinking_mode = 'auto' }
 async function load() {
   try { config.value = await api<Config>('/api/config');
     const preferred = group.value === 'llm_configs' ? config.value.last_llm_config_name : config.value.last_embedding_config_name
@@ -58,6 +58,7 @@ async function save() {
 function add() { mode.value = 'new'; selected.value = ''; newName.value = ''; draft.value = {
   interface_format: group.value === 'llm_configs' ? 'OpenAI' : 'Ollama',
   base_url: '', model_name: '', api_key: '', temperature: 0.8, max_tokens: 8192, timeout: 600,
+  thinking_mode: 'auto',
 }; feedback.value = ''; error.value = '' }
 async function remove() {
   if (mode.value !== 'edit' || !selected.value || !await askConfirm({
@@ -133,6 +134,8 @@ onMounted(() => { void load() })
       <label v-if="group === 'llm_configs'">最大 tokens<input v-model.number="draft.max_tokens" type="number"></label>
       <label v-if="group === 'embedding_configs'">检索条数<input v-model.number="draft.retrieval_k" type="number"></label>
       <label>超时秒数<input v-model.number="draft.timeout" type="number"></label></div>
+    <label v-if="group === 'llm_configs'">对话思考策略<select v-model="draft.thinking_mode"><option value="auto">自动关闭思考（推荐）</option><option value="provider_default">使用接口默认值</option></select></label>
+    <p v-if="group === 'llm_configs'" class="muted-note">自动模式会为未知模型尝试关闭思考；接口明确不支持参数时自动移除并重试。此设置用于对话工具链，不改变正文创作温度。</p>
     <div class="config-editor-actions"><button :disabled="testing" @click="save">{{ mode === 'new' ? '新增并保存' : '保存修改' }}</button><button class="subtle" :disabled="testing" @click="test">{{ testing ? '测试中…' : '保存并测试连接' }}</button><button v-if="mode === 'edit'" class="danger subtle" :disabled="testing || names.length <= 1" @click="remove">删除此配置</button></div></div><p v-else class="muted-note">请从左侧选择配置，或新增一份。</p>
   </div></section>
   <section class="panel"><h2>默认模型与运行环境</h2>

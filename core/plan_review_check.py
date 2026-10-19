@@ -1,4 +1,12 @@
 """Check targeted acceptance coverage without comparing model-repeated prose."""
+import re
+
+
+def _same_text_span(quote, source_text):
+    """Locate a verbatim span while ignoring presentation-only whitespace."""
+    compact_quote = re.sub(r"\s+", " ", str(quote or "")).strip()
+    compact_source = re.sub(r"\s+", " ", str(source_text or "")).strip()
+    return bool(compact_quote and compact_quote in compact_source)
 
 
 def creative_requirement_items(request):
@@ -26,7 +34,7 @@ def _located_plan_citations(check, sources):
             raise ValueError('创作目标核对的规划引文格式无效')
         source = plan_sources.get(citation.get('source_id'))
         quote = str(citation.get('quote') or '').strip()
-        if not source or not quote or quote not in source['text']:
+        if not source or not _same_text_span(quote, source['text']):
             raise ValueError('创作目标核对所引规划原文无法定位')
         located.append({'source_id': source['id'], 'quote': quote, 'label': source['label']})
     return located

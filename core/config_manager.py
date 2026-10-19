@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
             "max_tokens": 8192,
             "timeout": 2400,
             "interface_format": "Ollama",
+            "thinking_mode": "auto",
         },
         "DeepSeek": {
             "api_key": "",
@@ -42,6 +43,7 @@ DEFAULT_CONFIG = {
             "max_tokens": 8192,
             "timeout": 600,
             "interface_format": "DeepSeek",
+            "thinking_mode": "auto",
         },
         "OpenAI": {
             "api_key": "",
@@ -51,6 +53,7 @@ DEFAULT_CONFIG = {
             "max_tokens": 8192,
             "timeout": 600,
             "interface_format": "OpenAI",
+            "thinking_mode": "auto",
         },
     },
     "embedding_configs": {
@@ -124,6 +127,9 @@ def normalize_config(config_data: dict) -> dict:
         _merge_missing_values(config_data[section], defaults[section])
 
     llm_configs = config_data["llm_configs"]
+    for value in llm_configs.values():
+        if isinstance(value, dict):
+            value.setdefault("thinking_mode", "auto")
     last_llm = config_data.get("last_llm_config_name")
     if last_llm not in llm_configs:
         last_llm = (DEFAULT_LLM_CONFIG_NAME if DEFAULT_LLM_CONFIG_NAME in llm_configs

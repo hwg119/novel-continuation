@@ -18,5 +18,6 @@ zhconv
 python-docx==1.2.0
 Pillow==12.3.0
 fastapi>=0.115,<1
+pydantic>=2.8,<3
 uvicorn>=0.30,<1
 python-multipart>=0.0.9,<1

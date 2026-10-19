@@ -1049,10 +1049,17 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
         audit.write("repair_evidence_policy", stage=stage,
                     policy="clarify_supported_or_show_new_discovery_not_invent_past")
     attempts = 1 if stage in {"editorial_patch", "acceptance_editorial_patch"} else 2
+    configured_budget = int(getattr(llm, "cfg", {}).get("max_tokens", 4096) or 4096)
+    # A six-beat plan with evidence fields regularly exceeds the old 2760-token
+    # limit on verbose models. Keep the request within the user's provider limit,
+    # while reserving enough room to close the complete JSON object.
+    output_budget = min(configured_budget, max(4096, num_beats * 720))
     for attempt in range(attempts):
         request = prompt if attempt == 0 else (
             f"上次输出无法解析或结构不完整：{last_error}。"
-            "请保留原任务，只修复输出格式并给出完整 JSON 对象。\n\n" + prompt)
+            "请重新给出完整 JSON 对象，不要续写残缺片段。为确保输出完整，"
+            "压缩各幕文字：desc 不超过 180 个汉字，known_before 与 new_facts 各最多 3 条，"
+            "new_elements 通常最多 1 个；不要在不同字段重复解释同一事件。\n\n" + prompt)
         request_temperature = temperature if attempt == 0 else 0.1
         if audit:
             audit.write("model_request", stage=stage, attempt=attempt + 1,
@@ -1063,7 +1070,7 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
             raw = llm.complete(
                 request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
                 temperature=request_temperature,
-                num_predict=max(2200, num_beats * 460), disable_thinking=True)
+                num_predict=output_budget, disable_thinking=True)
         except Exception as exc:
             if audit:
                 audit.write("model_request_failed", stage=stage, attempt=attempt + 1,
@@ -1075,7 +1082,8 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
                         elapsed_ms=round((time.monotonic() - started) * 1000),
                         response_chars=len(raw or ""), raw_response=raw)
         try:
-            data = _first_json_object(raw)
+            from core.structured_output import validate_chapter_plan
+            data = validate_chapter_plan(_first_json_object(raw))
             issues = _chapter_plan_issues(data, num_beats, "")
             if audit:
                 audit.write("structure_check", stage=stage, attempt=attempt + 1,
@@ -1088,9 +1096,13 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
             last_error = "；".join(issues)
         except ValueError as exc:
             last_error = str(exc)
+            stripped = str(raw or "").rstrip()
+            if stripped and not stripped.endswith("}"):
+                last_error = "模型输出在完整 JSON 结束前被截断"
             if audit:
                 audit.write("parse_failed", stage=stage, attempt=attempt + 1,
-                            error=last_error)
+                            error=last_error, likely_truncated=bool(stripped and not stripped.endswith("}")),
+                            output_budget=output_budget)
     raise ValueError(last_error)
 
 
@@ -1129,8 +1141,11 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
         started = time.monotonic()
         if project_dir and chapter_number:
             from core.planning_research import research_review
+            from core.structured_output import validate_plan_review
+            def parse_review(raw):
+                return validate_plan_review(_first_json_object(raw))
             data = research_review(llm, prompt, sources, project_dir, int(chapter_number),
-                                   _first_json_object, audit=audit, progress=progress,
+                                   parse_review, audit=audit, progress=progress,
                                    num_predict=max(1600, num_beats * 300))
         else:
             raw = llm.complete(
@@ -1141,7 +1156,8 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
                 audit.write("review_response",
                             elapsed_ms=round((time.monotonic() - started) * 1000),
                             response_chars=len(raw or ""), raw_response=raw)
-            data = _first_json_object(raw)
+            from core.structured_output import validate_plan_review
+            data = validate_plan_review(_first_json_object(raw))
         issues = data.get("issues")
         if not isinstance(issues, list):
             if audit:
@@ -1208,14 +1224,13 @@ def _validate_rewritten_plan(llm: ContinuationLLM, draft: dict, rewritten: dict,
         audit.write("acceptance_request", prompt_chars=len(prompt), prompt=prompt)
     started = time.monotonic()
     try:
-        raw = llm.complete(
-            prompt, system="你只验收章节规划并输出 JSON，不重写正文或规划。",
+        from core.model_response import complete_review
+        raw = complete_review(
+            llm, prompt, audit=audit, progress=None, event_prefix="acceptance",
+            response_event="acceptance_response",
+            system="你只验收章节规划并输出 JSON，不重写正文或规划。",
             temperature=0.1, num_predict=max(1600, num_beats * 300),
             disable_thinking=True)
-        if audit:
-            audit.write("acceptance_response",
-                        elapsed_ms=round((time.monotonic() - started) * 1000),
-                        response_chars=len(raw or ""), raw_response=raw)
         data = _first_json_object(raw)
         from core.plan_review_check import acceptance_coverage
         coverage = acceptance_coverage(review_issues, data)

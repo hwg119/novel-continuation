@@ -6,3 +6,5 @@
 {"title":"回目","beats":[{"num":"一","name":"幕名","pov":"视角人物","time":"相对时间","location":"地点","known_before":["已知信息"],"new_facts":["本幕新信息"],"new_elements":[{"name":"主要新增元素","type":"类别","source_or_entry":"进入剧情的过程","future_use":"后续用途"}],"desc":"具体事件与人物选择","end_state":"结束状态及未完成线索"}]}
 
 没有主要新增元素则 new_elements 为 []。不输出思考、解释或 Markdown。
+
+规划是供后续写作使用的结构提纲，不是正文。每幕保持紧凑：desc 建议不超过 220 个汉字，known_before 与 new_facts 各最多 3 条且每条只写一个事实，new_elements 只登记会持续影响后文的主要新增元素（通常 0 至 1 个）。避免在多个字段重复叙述同一事件；优先确保所有指定幕和完整 JSON 均能输出。

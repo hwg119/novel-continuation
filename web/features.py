@@ -291,8 +291,12 @@ def register_features(app: FastAPI, workspace_root: str,
                 config["default_llm_config_name"] = name
         else:
             current = dict(configs.get(name, {}))
+        thinking_mode = payload.values.get("thinking_mode")
+        if group == "llm_configs" and thinking_mode not in (None, "auto", "provider_default"):
+            raise HTTPException(400, "对话思考策略无效")
         allowed = {"interface_format", "base_url", "model_name", "api_key",
-                   "temperature", "max_tokens", "timeout", "num_ctx", "retrieval_k"}
+                   "temperature", "max_tokens", "timeout", "num_ctx", "retrieval_k",
+                   "thinking_mode"}
         current.update({key: value for key, value in payload.values.items()
                         if key in allowed and (key != "api_key" or value)})
         current.pop("has_api_key", None)
