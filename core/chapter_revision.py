@@ -168,6 +168,8 @@ def check_chapter_candidate(text: str, source: str, requirements: str,
     issues = []
     if not candidate:
         return ["模型未返回正文"]
+    if (requirements or "").strip() and candidate == (source or "").strip():
+        issues.append("修订稿与原正文完全相同，用户要求尚未实际落实")
     if len(candidate) < len((source or "").strip()) * 0.65:
         issues.append("修订稿不足原文字数的 65%，可能遗漏了部分幕")
     required, forbidden = explicit_checks(requirements)
@@ -267,6 +269,7 @@ def review_candidate_requirements(model, text: str, requirements: str,
 不得因为个人文风偏好报错；只有明确违反、遗漏、人物动作归属错误或幕范围错误才报告。
 尚待验证的信息不得提前当作已确认事实。明确的假设和疑问不算提前断言。
 每个问题必须附准确原句和无法同时成立的原因。概述不是完整列举，未描写不等于未发生；不要把合理省略、比喻、可解释的状态变化或证据不足作为错误。不能仅因补充了原先未提及的细节而报错。
+时间连续性只核对事件顺序、消息收发和人物行程能否成立。除非具体时间是证据、期限或用户明确要求，不因缺少钟点、路程耗时或逐日说明报错，也不要求逐字采用建议中的日期句式。自然时间锚点足以确定先后时，应视为满足。
 
 {evidence}
 
@@ -306,10 +309,25 @@ def review_candidate_requirements(model, text: str, requirements: str,
             return ["验收未完成：模型问题数组无法解析，请重新验收"]
     if not isinstance(data, list):
         return ["验收未完成：模型返回的不是问题数组，请重新验收"]
-    if any(not isinstance(item, str) or not item.strip() for item in data):
-        return ["验收未完成：问题数组必须仅包含非空字符串，请重新验收"]
-    return list(dict.fromkeys(str(item).strip() for item in data
-                              if isinstance(item, str) and item.strip()))[:10]
+    issues = []
+    for item in data:
+        if isinstance(item, str):
+            message = item.strip()
+        elif isinstance(item, dict):
+            # 一些 OpenAI 兼容模型会稳定返回结构化问题对象。只要其中有
+            # 可读的问题字段，就将其规范化，而不是因 JSON 形状差异失败。
+            message = str(item.get("problem") or item.get("message") or
+                          item.get("issue") or item.get("reason") or "").strip()
+            quote = str(item.get("quote") or item.get("evidence") or "").strip()
+            if message and quote and quote not in message:
+                message += f"（原句：{quote}）"
+        else:
+            message = ""
+        if message:
+            issues.append(message)
+    if data and not issues:
+        return ["验收未完成：模型返回的问题缺少可读说明，请重新验收"]
+    return list(dict.fromkeys(issues))[:10]
 
 
 def check_beat_candidate(text: str, source: str, requirements: str,

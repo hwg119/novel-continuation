@@ -28,8 +28,9 @@ export function storyAuditDisplay(kind: string, summary: string, report: string,
 }
 
 // 只导入用户选中的增强，未选中意见和待核对提醒不成为修订要求。
-export function importStoryRequirements(main: string, enhancements: StoryEnhancement[], selected: string[]) {
+export function importStoryRequirements(main: string, enhancements: StoryEnhancement[], selected: string[], report = '') {
   const chosen = enhancements.filter(item => selected.includes(item.id))
+  if (!chosen.length && !main.trim() && report.trim()) return `【完整审校报告（未提取出明确修订项）】\n${report.trim()}`
   if (!chosen.length) return main.trim()
   const sections = main.trim() ? [`【主线修订】\n${main.trim()}`] : []
   sections.push('【已选择的情节增强】\n' + chosen.map((item, i) =>

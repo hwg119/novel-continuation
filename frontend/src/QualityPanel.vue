@@ -33,6 +33,8 @@ const storyDetails = ref<string | null | undefined>(undefined)
 const auditDisplay = computed(() => storyAuditDisplay(
   auditKind.value, storySummary.value, report.value, storyDetails.value))
 const importRequirements = computed(() => importStoryRequirements(
+  auditRequirements.value, enhancements.value, selectedEnhancements.value, report.value))
+const hasActionableAudit = computed(() => !!importStoryRequirements(
   auditRequirements.value, enhancements.value, selectedEnhancements.value))
 const issues = ref<string[]>([])
 const error = ref('')
@@ -148,7 +150,9 @@ function useAuditRequirements() {
   if (!currentReport || running.value) return
   revisionMode.value = 'local'
   requirements.value = currentReport
-  feedback.value = '已覆盖导入主线修订与选中的情节增强；未选中的意见和待核对提醒未带入。'
+  feedback.value = auditRequirements.value.trim() || selectedEnhancements.value.length
+    ? '已覆盖导入主线修订与选中的情节增强；未选中的意见和待核对提醒未带入。'
+    : '本次没有明确修订项，已导入完整审校报告供模型重新核对；没有可确认的问题时应保持原文。'
 }
 async function pollJob(id: string, done: (job: Job) => void) {
   const check = async () => {
@@ -245,8 +249,8 @@ watch(() => [props.projectId, props.chapterNumber], () => {
     </div>
     <details v-if="auditNotes.length"><summary>待核对提醒（{{ auditNotes.length }} 项，不自动修订）</summary><ul><li v-for="(note, index) in auditNotes" :key="index">{{ note }}</li></ul></details><details v-if="auditDisplay.details"><summary>查看详细审校依据</summary><pre class="report">{{ auditDisplay.details }}</pre></details></template></section>
     <section class="panel"><h2>修订</h2><label>修订方式<select v-model="revisionMode" :disabled="running" @change="revisionModeChanged"><option value="local">局部修补（推荐）</option><option value="whole">整章重写 · 情节或风格大调整</option><option value="polish">表达润色 · 去 AI 味（可选）</option></select></label>
-      <button type="button" class="subtle" :disabled="running || !importRequirements" :title="importRequirements ? '导入主线修订与勾选的情节增强，覆盖输入框已有内容' : '先进行故事审校或勾选情节增强意见'" @click="useAuditRequirements">一键导入修订要求</button>
-      <p class="muted-note">{{ polishing ? '只润色当前正文的表达，不改变剧情。修订稿须先应用到正文编辑器才能继续润色；不会自动追加模型调用。' : '仅导入主线要求与勾选的增强意见；需要增删段落或重构场景时，选择整章重写。' }}</p>
+      <button type="button" class="subtle" :disabled="running || !importRequirements" :title="hasActionableAudit ? '导入主线修订与勾选的情节增强，覆盖输入框已有内容' : '导入完整报告重新复核；没有可确认的问题时保持原文'" @click="useAuditRequirements">{{ hasActionableAudit ? '一键导入修订要求' : '根据完整报告重新复核' }}</button>
+      <p class="muted-note">{{ polishing ? '只润色当前正文的表达，不改变剧情。修订稿须先应用到正文编辑器才能继续润色；不会自动追加模型调用。' : hasActionableAudit ? '仅导入主线要求与勾选的增强意见；需要增删段落或重构场景时，选择整章重写。' : '本次审校没有明确修订项；重新复核只生成候选稿，没有可确认的问题时应保持原文。' }}</p>
       <label>{{ polishing ? '额外表达偏好（可不填）' : '修订要求' }}<textarea v-model="requirements" rows="7" :placeholder="polishing ? '例如保留含蓄口吻，减少重复解释；不填写则按润色 Skill 执行。' : '简短说明改什么、保留什么；一键导入会覆盖已有内容。'"></textarea></label>
       <button :disabled="!chapterNumber || !modelName || running || (!polishing && !requirements.trim())" @click="revise">{{ running ? '处理中…' : polishing ? '执行表达润色' : '执行修订' }}</button>
       <label v-if="drafts.length" class="revision-history-picker">历史修订建议<select v-model="selectedDraft">

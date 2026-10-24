@@ -1562,7 +1562,7 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 5. 允许保留或调整原规划中的新增元素，通常聚焦一个，但不以数量限制合理创作；普通线索材料放入 new_facts 即可。
 6. 自检完整目标和修改牵动的逻辑：人物信息与物件先取得后使用，推测不直接升级为事实，线索并置不等于因果确认。直接替换原有内容，同步相关幕和状态，不追加重复的新旧说明。desc 只写场景事件，不复制旧稿中已知信息、新增信息和结尾状态的附注；这些内容在对应结构字段更新。不要输出自检报告或修改说明。
 7. 动态上下文中已经完成的内容不得原样重演；章末状态是修订起点，若发生变化必须保留自然过程。若分幕记录与正文摘要冲突，以正文摘要和正文结尾为准。
-8. 根据上一章开头定位和结尾状态承接时间，次日不能沿用前一日日期；倒叙或并行场景须明确说明，无法确定日期时用相对时间。情绪未解决不等于既有信息尚未告知，不得把新态度写成首次获知。
+8. 根据上一章结尾状态承接事件顺序；倒叙或并行场景须明确说明，无法确定日期时使用自然的相对时间。只有日期参与证据、期限或行动时才写具体日期和钟点，不为每幕补充时间刻度。情绪未解决不等于既有信息尚未告知，不得把新态度写成首次获知。
 
 输出严格 JSON 对象：
 {{"title":"本章回目","beats":[{{"num":"一","name":"幕名","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"简短类别","source_or_entry":"如何自然进入当前剧情","future_use":"后续用途"}}],"desc":"本幕具体事件","end_state":"幕末状态与未完成线索"}}]}}。
@@ -1584,30 +1584,64 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     for attempt in range(max_generation_attempts):
         data = None
         repair_prompt = prompt
-        if attempt and candidate:
-            repair_current = {'title':candidate['chapter_title'], 'beats':candidate['beats']}
+        repair_source = ({'title':candidate['chapter_title'], 'beats':candidate['beats']}
+                         if candidate else None)
+        if attempt and repair_source:
+            repair_current = repair_source
             repair_prompt = prompt.replace(json.dumps(current, ensure_ascii=False),
                                            json.dumps(repair_current, ensure_ascii=False), 1)
             if audit:
                 audit.write('plan_repair_baseline', attempt=attempt+1,
-                            source='previous_candidate', candidate=repair_current)
+                            source='previous_candidate',
+                            candidate=repair_current)
         request = prompt if attempt == 0 else (
             "上次修订未落实要求或未通过结构检查：" +
             "；".join(parse_error or ["JSON 无效"]) +
-            "。在下面最新候选上补修，保留已经落实的修改，不从最初稿重写。修正后直接输出完整 JSON。\n\n" + repair_prompt)
+            "。在下面最新候选上补修，保留已经落实的修改，不从最初稿重写。"
+            "压缩重复说明，修正后直接输出完整 JSON。\n\n" + repair_prompt)
         if audit:
             audit.write("model_request", stage="user_plan_revision", attempt=attempt + 1, prompt=request)
         if progress:
             progress('正在按用户问题修订分幕' if attempt == 0 else
                      f'正在按验收结果定向补修（第 {attempt}/{max_generation_attempts - 1} 次）')
+        configured_budget = int(getattr(llm, "cfg", {}).get("max_tokens", 4096) or 4096)
+        output_budget = min(configured_budget, max(4096, num_beats * 720))
         raw = llm.complete(
             request, system="你是小说结构编辑，只输出 JSON，不输出思考过程。",
             temperature=0.3 if attempt == 0 else 0.1,
-            num_predict=max(2400, num_beats * 460), disable_thinking=True)
+            num_predict=output_budget, disable_thinking=True)
         if audit:
-            audit.write("model_response", stage="user_plan_revision", attempt=attempt + 1, raw_response=raw)
+            audit.write("model_response", stage="user_plan_revision", attempt=attempt + 1,
+                        response_chars=len(raw or ''), output_budget=output_budget,
+                        response_diagnostics=getattr(llm, 'last_response_diagnostics', {}),
+                        raw_response=raw)
         try:
             data = _first_json_object(raw)
+            raw_beats = data.get('beats') if isinstance(data, dict) else None
+            actual_count = len(raw_beats) if isinstance(raw_beats, list) else 0
+            # A complete, structurally valid plan with a different beat count is
+            # a creative alternative, not a broken response. Preserve it and let
+            # the user choose whether to keep it or ask the model to consolidate.
+            if actual_count and actual_count != num_beats:
+                shape_issues = _chapter_plan_issues(data, actual_count, previous_context)
+                if not shape_issues:
+                    title = _plan_title(data.get('title'), settings.get('chapter_number'))
+                    beats = _parse_beats(json.dumps(raw_beats, ensure_ascii=False), actual_count)
+                    review = {
+                        'status': 'shape_choice', 'source': 'user_revision',
+                        'summary': (f'模型生成了完整的 {actual_count} 幕候选稿；原规划为 {num_beats} 幕。'
+                                    f'请决定保持 {actual_count} 幕，或让模型合并为 {num_beats} 幕。'),
+                        'requirements': issues[:5000], 'generation_attempts': attempt + 1,
+                        'requested_beat_count': num_beats, 'actual_beat_count': actual_count,
+                        'editorial_notes': [],
+                    }
+                    if progress:
+                        progress(f'模型生成了 {actual_count} 幕，等待选择保持或合并为 {num_beats} 幕')
+                    if audit:
+                        audit.write('plan_shape_choice', requested_beat_count=num_beats,
+                                    actual_beat_count=actual_count, chapter_title=title)
+                    return {'chapter_title': title, 'beats': beats, 'planning_review': review,
+                            'log_path': str(getattr(audit, 'path', '')) if audit else ''}
             parse_error = _chapter_plan_issues(data, num_beats, previous_context)
             if not parse_error:
                 title = _plan_title(data.get('title'),settings.get('chapter_number'))
@@ -1631,7 +1665,9 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             data = None
         except ValueError as exc:
             data = None
-            parse_error = [str(exc)]
+            stripped = str(raw or '').rstrip()
+            parse_error = ["模型输出在完整 JSON 结束前被截断"
+                           if stripped and not stripped.endswith('}') else str(exc)]
     if candidate is None:
         raise ValueError("章节规划修订未通过：" +
                          "；".join(parse_error or ["模型未返回章节规划 JSON"]))

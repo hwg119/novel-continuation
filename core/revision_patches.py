@@ -11,11 +11,11 @@ def numbered_paragraphs(text):
     return [{"id": i + 1, "text": text[a:b]} for i, (a, b) in enumerate(paragraph_spans(text))]
 
 
-def array_call(model, prompt, audit, stage, temperature=0,
+def array_call(model, prompt, audit, stage, temperature=0, num_predict=3500,
                system="你是局部修订编辑，只输出 JSON 数组。"):
     audit.write("patch_request", stage=stage, prompt=prompt)
     raw = model.complete(prompt, system=system,
-                         temperature=temperature, num_predict=3500, disable_thinking=True)
+                         temperature=temperature, num_predict=num_predict, disable_thinking=True)
     audit.write("patch_response", stage=stage, raw_response=raw)
     match = re.search(r"\[[\s\S]*\]", raw or "")
     if not match:
@@ -57,6 +57,8 @@ def apply_patches(text, patches, allowed_ids):
         if not isinstance(patch, dict):
             raise ValueError("补丁格式错误")
         i, before, after = patch.get("id"), patch.get("before"), patch.get("after")
+        if isinstance(i, str) and i.strip().isdigit():
+            i = int(i.strip())
         if type(i) is not int or i not in allowed_ids or i in updates:
             raise ValueError("补丁越界或段落重复")
         a, b = spans[i - 1]
@@ -97,7 +99,22 @@ def generate_local_patch(model, text, requirements, audit, settings=None):
     settings = settings or {}
     prompt += "\n【工程设定与章节要求】\n" + json.dumps({key: settings.get(key, "") for key in (
         "background", "extra_requirements", "chapter_requirements")}, ensure_ascii=False)
-    patches = array_call(model, prompt, audit, "local_patch", temperature=0.3)
+    # 补丁同时携带 before/after，输出体积通常是实际改动的两倍以上。
+    # 固定 3500 token 会截断长章节或跨多段修订，因此按正文规模给预算。
+    output_budget = max(5000, min(14000, len(text) * 2))
+    patches = array_call(model, prompt, audit, "local_patch", temperature=0.3,
+                         num_predict=output_budget)
     candidate = apply_patches(text, patches, [row["id"] for row in rows])
+    if candidate.strip() == text.strip() and (requirements or "").strip():
+        audit.write("patch_no_change", stage="local_patch", retry=True)
+        retry_prompt = prompt + """
+
+【上次结果】
+上次返回了空补丁，或替换后的正文与原文完全一致，尚未落实用户要求。
+请重新定位确实需要修改的段落并输出非空补丁。只改为落实上述要求所必需的内容；不要解释。若要求涉及多处，须完整覆盖。
+"""
+        patches = array_call(model, retry_prompt, audit, "local_patch_retry", temperature=0.2,
+                             num_predict=output_budget)
+        candidate = apply_patches(text, patches, [row["id"] for row in rows])
     audit.write("patch_applied", stage="local_patch", patches=patches)
     return candidate

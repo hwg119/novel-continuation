@@ -528,7 +528,10 @@ def register_features(app: FastAPI, workspace_root: str,
                                     "chapter_requirements", "beats_per_chapter",
                                     "chapter_title", "beats")})
         current_beats = settings.get("beats") or []
-        num_beats = len(current_beats) or int(settings.get("beats_per_chapter") or 6)
+        target_count = payload.preview.get('_target_beat_count')
+        if target_count is not None and (type(target_count) is not int or not 1 <= target_count <= 12):
+            raise HTTPException(400, "目标幕数必须为 1～12")
+        num_beats = target_count or len(current_beats) or int(settings.get("beats_per_chapter") or 6)
         previous = _planning_context(path, project_settings, payload.number)
         wiki = wiki_context(path, previous, before_chapter=payload.number)
         model_cfg = llm(payload.model_name)
@@ -1413,8 +1416,11 @@ def register_features(app: FastAPI, workspace_root: str,
 
     from web.chat import register_chat
     def chat_request(data):
+        preview = dict(data.get('plan_baseline_preview', {})) if data['tool'] == 'plan_revision' else {}
+        if data.get('target_beat_count') is not None:
+            preview['_target_beat_count'] = data['target_beat_count']
         return ChapterRequest(number=data['chapter'], model_name=data['model_name'],
-                              preview=data.get('plan_baseline_preview', {}) if data['tool'] == 'plan_revision' else {},
+                              preview=preview,
                               plan_baseline=data.get('plan_baseline', {}),
                               work_object=data.get('work_object', {}),
                               revision_source=data.get('revision_source'),

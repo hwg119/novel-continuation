@@ -21,7 +21,6 @@ export function resultCard(data: Record<string, any>, savedPlan = false, selecte
   } else if (completed && tool === 'illustration') actions.push({label:'打开插图设置',view:'settings'},{label:'查看章节',view:'write'})
   else if (completed && tool === 'generate') actions.push({ label: '阅读正文', view: 'write' }, { label: '打开审校与修订', view: 'quality' })
   else if (completed && ['plan','plan_revision'].includes(tool)) actions.push({ label: '打开续写设定', view: 'settings' })
-  actions.push({ label: '查看运行记录', view: 'runs', query: { job: data.job_id } })
   return { title: titles[tool] || '处理结果', state, tool, completed, actions }
 }
 

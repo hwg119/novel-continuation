@@ -27,6 +27,12 @@ test('empty or outdated selections do not manufacture requirements', () => {
   assert.equal(importStoryRequirements('', [], ['E01']), '')
 })
 
+test('full report remains importable when no explicit requirement was extracted', () => {
+  const result = importStoryRequirements('', [], [], '连续性成立，但请再次核对称谓。')
+  assert.match(result, /完整审校报告/)
+  assert.match(result, /再次核对称谓/)
+})
+
 test('old story report without issues shows summary once and hides empty details', () => {
   const summary = '两条人物线推进有效，尚有未解悬念。'
   const report = `【故事审校】\r\n${summary}\r\n\r\n【主线依据】\r\n未发现有充分依据的重大主线问题；不代表全文没有细节错误。`

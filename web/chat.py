@@ -34,6 +34,10 @@ class ReplyPlanRequest(BaseModel):
     model_name: str = ''
 
 
+class PlanShapeRequest(BaseModel):
+    model_name: str = ''
+
+
 def audit_revision_requirements(result, selected):
     main = str(result.get('revision_requirements') or '').strip()
     chosen = [row for row in result.get('story_enhancements') or [] if row.get('id') in selected]
@@ -42,6 +46,15 @@ def audit_revision_requirements(result, selected):
         parts.append('【已选择的情节增强】\n' + '\n'.join(
             f"{i + 1}. {row.get('scope') or ''}：{row.get('suggestion') or ''}\n保留：{row.get('preserve') or ''}"
             for i, row in enumerate(chosen)))
+    report = str(result.get('report') or '').strip()
+    summary = str(result.get('story_summary') or '').strip()
+    if not parts and (report or summary):
+        parts.append('【审校结论（未提取出明确修订项）】\n' + (report or summary)[:12000])
+        parts.append('【处理原则】\n请根据报告重新核对正文；只修改能够从报告和正文中确认的问题。'
+                     '若报告没有指出可落实的问题，保持原文，不要为了产生修订稿而强行改写。')
+    if not parts:
+        parts.append('【处理要求】\n重新核对当前正文的连续性与人物知识边界。'
+                     '只修正确实存在且能够从正文确认的问题；没有问题时保持原文，不要强行改写。')
     return '\n\n'.join(parts)
 
 
@@ -92,6 +105,7 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         result = job.get('result') or {}
         return {'action_id':action,'job_id':job['id'],'status':job['status'],
             'text':job['message'] + (' · 修订基准：' + data['plan_baseline']['label'] if data.get('plan_baseline') else ''),'chapter':data['chapter'],
+            'stage':job.get('stage'),
             'plan_baseline':data.get('plan_baseline'),
             'work_object':data.get('work_object'),
             'view':{'plan':'settings','plan_revision':'settings','generate':'write',
@@ -230,7 +244,7 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                         baseline_data = backend.bind_operation(tool,number,target,
                             decision.get('artifact_selection_reason') or decision.get('plan_selection_reason') or '')
                         store.emit(ident,'progress',{'turn_id':turn,'text':'已确定工作对象', 'details':baseline_data['work_object']})
-                    store.action(ident, {**baseline_data, 'tool': tool, 'chapter': number,
+                    action_id = store.action(ident, {**baseline_data, 'tool': tool, 'chapter': number,
                         'requirements': requirements, 'model_name': payload.model_name,
                         'original_user_request': payload.text.strip(),
                         'source_request_turn':decision.get('source_request_turn'),
@@ -242,7 +256,11 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                                     if tool == 'plan' else '按你的要求修订；基准：' + baseline_data['plan_baseline']['label']
                                     if tool == 'plan_revision' else '按你的要求修订正文；基准：' + baseline_data['work_object']['title']
                                     if tool == 'revise' else str(decision.get('message') or '确认后执行')),
-                        'turn_id': turn})
+                        'turn_id': turn, 'auto_execute': True})
+                    # A tool proposal is already the dialogue agent's structured
+                    # interpretation of an explicit user operation. Start it now;
+                    # do not ask the user to approve the same request twice.
+                    confirm(project_id, ident, action_id)
                 else:
                     if isinstance(number, int) and not isinstance(number, bool) and number > 0 and number != chapter:
                         context['current_chapter'] = number
@@ -312,6 +330,58 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         if not save_project_settings(path,settings): raise HTTPException(500,'规划保存失败')
         store.emit(ident,'plan_saved',{'action_id':action,'text':f"第 {data['chapter']} 章分幕已保存"})
         return {'saved': True}
+
+    @app.post(base + '/{ident}/actions/{action}/retry', dependencies=[Depends(write_required)])
+    def retry_action(project_id: str, ident: str, action: str, payload: PlanShapeRequest):
+        path, _ = session(project_id, ident)
+        item = store.get_action(ident, action)
+        if not item or not item['job']:
+            raise HTTPException(400, '原任务不存在')
+        job = jobs.get(path, item['job'])
+        if not job or job.get('status') not in ('failed', 'cancelled', 'interrupted'):
+            raise HTTPException(400, '只有失败、中断或取消的任务可以重新执行')
+        data = dict(item['data'])
+        config = llm_config(payload.model_name)
+        data.update({'model_name': payload.model_name, 'model': config.get('model_name'),
+                     'plan_before': plan_hash(path, data['chapter']), 'auto_execute': True,
+                     'message': '重新执行上次操作；仍在当前对话显示过程和结果。'})
+        next_action = store.action(ident, data)
+        return confirm(project_id, ident, next_action)
+
+    @app.post(base + '/{ident}/actions/{action}/reshape-plan', dependencies=[Depends(write_required)])
+    def reshape_plan(project_id: str, ident: str, action: str, payload: PlanShapeRequest):
+        path, _ = session(project_id, ident)
+        item = store.get_action(ident, action)
+        if not item or item['data'].get('tool') not in ('plan', 'plan_revision') or not item['job']:
+            raise HTTPException(400, '该卡片不是可调整幕数的分幕候选稿')
+        job = jobs.get(path, item['job'])
+        result = (job or {}).get('result') or {}
+        review = result.get('planning_review') or {}
+        if (job or {}).get('status') != 'completed' or review.get('status') != 'shape_choice':
+            raise HTTPException(400, '该候选稿不需要选择幕数')
+        requested = review.get('requested_beat_count')
+        actual = review.get('actual_beat_count')
+        if type(requested) is not int or requested < 1 or type(actual) is not int or actual < 1:
+            raise HTTPException(400, '候选稿幕数信息不完整')
+        config = llm_config(payload.model_name)
+        number = item['data']['chapter']
+        data = {
+            'tool': 'plan_revision', 'chapter': number, 'model_name': payload.model_name,
+            'model': config.get('model_name'), 'plan_before': plan_hash(path, number),
+            'target_beat_count': requested,
+            'requirements': (f'用户选择把当前完整的 {actual} 幕候选稿合并为 {requested} 幕。'
+                             '合并功能最接近的幕，保留所有仍需推进的事件、线索和人物选择；'
+                             '同步时间、人物已知信息与幕末状态，不得直接删除最后一幕。'),
+            'message': f'以当前 {actual} 幕候选稿为基准，合并为 {requested} 幕；生成后仍由用户检查和保存。',
+        }
+        try:
+            data.update(objects(path, ident).bind_operation(
+                'plan_revision', number, action, '用户选择将候选分幕合并到原规划幕数'))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        next_action = store.action(ident, data,
+            dedupe_key=f'plan-shape:{action}:{requested}:{payload.model_name}')
+        return confirm(project_id, ident, next_action)
 
     @app.post(base + '/{ident}/actions/{action}/apply-revision', dependencies=[Depends(write_required)])
     def apply_chat_revision(project_id: str, ident: str, action: str, payload: dict):
@@ -415,7 +485,6 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         valid = {row.get('id') for row in result.get('story_enhancements') or []}
         if any(key not in valid for key in payload.enhancements): raise HTTPException(400, '所选增强意见不属于该审校记录')
         requirements = audit_revision_requirements(result, payload.enhancements)
-        if not requirements: raise HTTPException(400, '没有主线修订要求，请先勾选增强意见')
         config = llm_config(payload.model_name)
         number = item['data']['chapter']
         data = {'tool':'revise','chapter':number,'requirements':requirements,

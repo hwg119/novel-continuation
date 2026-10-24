@@ -23,8 +23,8 @@ test('plan save state is independent from generation completion', () => {
 })
 test('revision actions point to the specific generated version', () => {
   const card = resultCard({ tool:'revise',status:'completed',job_id:'j1' })
-  assert.equal(card.actions.length,4)
-  for (const action of card.actions.slice(0,3)) {
+  assert.equal(card.actions.length,3)
+  for (const action of card.actions) {
     assert.equal(new URL(resultLink('p',6,action),'http://local').searchParams.get('revision'),'j1')
   }
   assert.match(card.state,/可在对话中比较并应用/)
@@ -32,14 +32,17 @@ test('revision actions point to the specific generated version', () => {
 test('review imports only actionable requirements and does not execute revision', () => {
   const data = { tool:'consistency',status:'completed',job_id:'j1',result:{} }
   assert.equal(resultCard(data).actions.some(a=>a.label==='导入要求并修订'),false)
+  data.result.report = '完整审校报告'
+  assert.equal(resultCard(data).actions.some(a=>a.label==='导入要求并修订'),false)
+  delete data.result.report
   data.result.revision_requirements = '保留结尾，补充转场'
   const action = resultCard(data).actions.find(a=>a.label==='导入要求并修订')
   assert.equal(action.view,'quality')
   assert.equal(action.query.audit,'j1')
 })
-test('failed tasks offer logs but no save or application actions', () => {
+test('failed tasks stay in the conversation and expose no navigation actions', () => {
   const card = resultCard({ tool:'revise',status:'failed',job_id:'j1' })
-  assert.deepEqual(card.actions.map(a=>a.view),['runs'])
+  assert.deepEqual(card.actions,[])
   assert.equal(card.completed,false)
 })
 
