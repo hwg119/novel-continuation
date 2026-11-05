@@ -10,7 +10,7 @@ from core.observability import observe, trace_context
 def planning_fingerprint(project_dir, chapter_number):
     """恢复前核对工程设定及近期正文、摘要，避免沿用过期输入。"""
     root = Path(project_dir)
-    files = [root / "project.json"]
+    files = [root / "project.json", root / "story_blueprint.json"]
     # 主动查阅可使用所有历史正文，恢复时不能沿用已变更的早期证据。
     for number in range(1, chapter_number):
         files.extend(root / "chapters" / name for name in

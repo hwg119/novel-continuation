@@ -8,10 +8,11 @@ import 'element-plus/es/components/dialog/style/css'
 
 type Annotation = { word: string; meaning: string }
 type Segment = { id: string; source: string; text: string; translation?: string;
-  translated: boolean; annotations: Annotation[] }
+  translated: boolean; annotations: Annotation[]; word_replacement?: {
+    before: string; word: string; meaning: string; after: string } }
 type LearningEdition = { chapter: number; level: string; level_label: string;
-  exists: boolean; valid: boolean; blocks: { index: number; segments: Segment[] }[];
-  stats: { segments?: number; translated_segments?: number; coverage?: number; annotations?: number } }
+  exists: boolean; valid: boolean; display_mode?: 'words' | 'sentences'; blocks: { index: number; segments: Segment[] }[];
+  stats: { segments?: number; translated_segments?: number; coverage?: number; annotations?: number; new_words?: number } }
 
 const props = defineProps<{ projectId: string; chapterNumber: number; modelName: string;
   dirty: boolean; sourceRevision: string }>()
@@ -24,7 +25,7 @@ const levels = [
 const level = ref('primary')
 const loadPreset = ref('light')
 const loads = [{ id:'light', label:'轻量', note:'约10%英文 · 最多5个新词' },
-  { id:'standard', label:'标准', note:'约20%英文 · 最多8个新词' },
+  { id:'standard', label:'中量', note:'约20%英文 · 最多8个新词' },
   { id:'challenge', label:'挑战', note:'约30%英文 · 最多12个新词' }]
 const edition = ref<LearningEdition | null>(null)
 const loading = ref(false)
@@ -39,6 +40,10 @@ const EXPORT_PREFS_KEY = 'novel-continuation:learning-export-options'
 
 const activeLevel = computed(() => levels.find(item => item.id === level.value)!)
 const coverage = computed(() => Math.round(Number(edition.value?.stats?.coverage || 0) * 100))
+const usesWordMode = computed(() => level.value === 'primary' && ['light', 'standard'].includes(loadPreset.value))
+const loadNote = computed(() => usesWordMode.value
+  ? `${loads.find(item => item.id === loadPreset.value)?.label} · 在中文中嵌入单个高频英文单词，不使用英文短语或整句`
+  : loads.find(item => item.id === loadPreset.value)?.note)
 let loadVersion = 0
 
 async function load() {
@@ -64,7 +69,9 @@ async function generate() {
     title: `${edition.value?.exists ? '重新生成' : '生成'}第 ${props.chapterNumber} 章${activeLevel.value.label}学习版？`,
     message: edition.value?.exists
       ? '现有同级学习版将被覆盖；小说正文、向量库和 Wiki 不会发生变化。'
-      : `模型只翻译适合${activeLevel.value.label}水平的部分完整句子，并为少量难词添加中文释义。`,
+      : usesWordMode.value
+        ? '模型会在中文句子中嵌入少量小学高频英文单词，不替换成英文短语或整句。'
+        : `模型只翻译适合${activeLevel.value.label}水平的部分完整句子，并为少量难词添加中文释义。`,
     symbol: '学', confirmLabel: edition.value?.exists ? '重新生成学习版' : '生成学习版',
     modelName: props.modelName,
   })) return
@@ -127,12 +134,12 @@ onMounted(() => { loadExportPreferences(); void load() })
 </script>
 
 <template><section class="learning-reader" aria-labelledby="learning-reader-title">
-  <header class="learning-reader-head"><div><span class="eyebrow">分级双语阅读 · 第 {{ chapterNumber }} 章</span><h2 id="learning-reader-title">在故事里，慢慢增加英文。</h2><p>只替换适合当前水平的完整句子；点击英文可核对中文原句。</p></div>
+  <header class="learning-reader-head"><div><span class="eyebrow">分级双语阅读 · 第 {{ chapterNumber }} 章</span><h2 id="learning-reader-title">在故事里，慢慢增加英文。</h2><p>小学轻量和中量从单词开始；其他模式逐步过渡到完整英文句子。</p></div>
     <div class="learning-head-actions"><button v-if="edition?.valid" class="learning-export-button" :disabled="generating || loading" @click="exportOpen = !exportOpen">导出学习版 Word</button><button :disabled="generating || loading || dirty || !modelName" @click="generate"><span v-if="generating" class="button-spinner" aria-hidden="true"></span>{{ generating ? '生成中…' : edition?.exists ? '重新生成' : '生成学习版' }}</button></div></header>
   <section class="learning-preferences" aria-label="学习版设置">
     <div class="learning-dimension"><header><h3>英语水平</h3><p>选择适合自己的句子难度</p></header><div class="learning-difficulty-options" role="group" aria-label="英语水平"><button v-for="item in levels" :key="item.id" type="button" :disabled="generating || exporting" :aria-pressed="level === item.id" :class="{ active: level === item.id }" @click="level = item.id"><strong>{{ item.label }}</strong><small>{{ item.note }}</small></button></div></div>
-    <div class="learning-dimension learning-quantity"><header><h3>英文占比</h3><p>水平不变，也可以少读一点英文</p></header><div class="learning-quantity-options" role="group" aria-label="英文占比"><button v-for="item in loads" :key="item.id" type="button" :disabled="generating || exporting" :aria-pressed="loadPreset === item.id" :class="{ active: loadPreset === item.id }" @click="loadPreset = item.id">{{ item.label }}</button></div><p class="learning-quantity-note">{{ loads.find(item => item.id === loadPreset)?.note }}</p></div>
-    <p class="learning-setting-note">每段最多一句英文，不强行凑满占比。新词按模型识别的难词统计。</p>
+    <div class="learning-dimension learning-quantity"><header><h3>英文占比</h3><p>水平不变，也可以少读一点英文</p></header><div class="learning-quantity-options" role="group" aria-label="英文占比"><button v-for="item in loads" :key="item.id" type="button" :disabled="generating || exporting" :aria-pressed="loadPreset === item.id" :class="{ active: loadPreset === item.id }" @click="loadPreset = item.id">{{ item.label }}</button></div><p class="learning-quantity-note">{{ loadNote }}</p></div>
+    <p class="learning-setting-note">{{ usesWordMode ? '每个选中句子只替换一个单词，优先使用动作、物品、颜色和情绪等基础词。' : '每段最多一句英文，不强行凑满占比。新词按模型识别的难词统计。' }}</p>
   </section>
   <ElDialog v-model="exportOpen" title="导出学习版 Word" class="learning-export-dialog" width="min(820px, 94vw)" append-to-body :close-on-click-modal="!exporting" :close-on-press-escape="!exporting" :show-close="!exporting">
     <section class="learning-export-panel"><div><span class="eyebrow">打印版式 · 自动记住选择</span><h3>选择中文提示出现的位置</h3></div><div class="learning-export-modes"><label :class="{ active: exportMode === 'endnotes' }"><input v-model="exportMode" type="radio" value="endnotes" :disabled="exporting"><span><strong>章末索引 <em>推荐</em></strong><small>正文只保留上标编号，中文原句集中放在章末，阅读最连贯。</small></span></label><label :class="{ active: exportMode === 'exercise' }"><input v-model="exportMode" type="radio" value="exercise" :disabled="exporting"><span><strong>练习模式</strong><small>正文隐藏释义和原句，答案统一放在章末。</small></span></label><label :class="{ active: exportMode === 'inline' }"><input v-model="exportMode" type="radio" value="inline" :disabled="exporting"><span><strong>段后对照</strong><small>每个自然段后列出中文原句，适合逐句精读，但会打断阅读。</small></span></label></div><div class="learning-export-options"><label><input v-model="includeVocabulary" type="checkbox" :disabled="exporting">附本章词汇表</label><label><input v-model="includeIllustration" type="checkbox" :disabled="exporting">包含本章插图（如有）</label></div></section>
@@ -141,8 +148,8 @@ onMounted(() => { loadExportPreferences(); void load() })
   <p v-if="dirty" class="learning-note warning">正文有未保存修改。保存后才能生成与当前正文一致的学习版。</p>
   <p v-else-if="loading" class="learning-empty">正在读取学习版…</p>
   <div v-else-if="edition?.valid" class="learning-sheet">
-    <div class="learning-stats"><span>英文覆盖约 <strong>{{ coverage }}%</strong></span><span>翻译 <strong>{{ edition.stats.translated_segments || 0 }}</strong> 句</span><span>注释 <strong>{{ edition.stats.annotations || 0 }}</strong> 词</span></div>
-    <div class="learning-prose"><p v-for="block in edition.blocks" :key="block.index"><template v-for="segment in block.segments" :key="segment.id"><button v-if="segment.translated" class="learning-sentence" :class="{ revealed: revealed.has(segment.id) }" :aria-expanded="revealed.has(segment.id)" @click="toggleSource(segment.id)"><span>{{ segment.text }}</span><small v-if="revealed.has(segment.id)">{{ segment.source }}</small></button><span v-else>{{ segment.text }}</span></template></p></div>
+    <div class="learning-stats"><template v-if="edition.display_mode === 'words'"><span>嵌入英文单词 <strong>{{ edition.stats.new_words || 0 }}</strong> 个</span><span>分布于 <strong>{{ edition.stats.translated_segments || 0 }}</strong> 句</span></template><template v-else><span>英文覆盖约 <strong>{{ coverage }}%</strong></span><span>翻译 <strong>{{ edition.stats.translated_segments || 0 }}</strong> 句</span></template><span>注释 <strong>{{ edition.stats.annotations || 0 }}</strong> 词</span></div>
+    <div class="learning-prose"><p v-for="block in edition.blocks" :key="block.index"><template v-for="segment in block.segments" :key="segment.id"><template v-if="edition.display_mode === 'words' && segment.word_replacement"><span>{{ segment.word_replacement.before }}</span><button class="learning-word" :class="{ revealed: revealed.has(segment.id) }" :aria-expanded="revealed.has(segment.id)" :title="revealed.has(segment.id) ? '点击隐藏中文' : '点击查看中文'" @click="toggleSource(segment.id)">{{ segment.word_replacement.word }}<small v-if="revealed.has(segment.id)">（{{ segment.word_replacement.meaning }}）</small></button><span>{{ segment.word_replacement.after }}</span></template><button v-else-if="segment.translated" class="learning-sentence" :class="{ revealed: revealed.has(segment.id) }" :aria-expanded="revealed.has(segment.id)" @click="toggleSource(segment.id)"><span>{{ segment.text }}</span><small v-if="revealed.has(segment.id)">{{ segment.source }}</small></button><span v-else>{{ segment.text }}</span></template></p></div>
   </div>
   <div v-else class="learning-empty"><span>{{ edition?.exists ? '旧学习版与当前正文不一致' : `${activeLevel.label}学习版尚未生成` }}</span><p>{{ edition?.exists ? '正文已经修改，请重新生成后再阅读。' : '生成后会保存在工程的 learning_editions 目录，不影响小说正文。' }}</p><button :disabled="generating || dirty || !modelName" @click="generate">{{ edition?.exists ? '重新生成此级别' : '生成此级别' }}</button></div>
 </section></template>
@@ -161,6 +168,7 @@ onMounted(() => { loadExportPreferences(); void load() })
 .learning-quantity-options button.active{background:#326b59;border-color:#326b59;color:#fff}
 .learning-quantity-note{grid-column:2;margin:0;font-size:12px;color:#587069}
 .learning-setting-note{margin:18px 0 0;font-size:12px;color:#789084}
+.learning-word{display:inline;margin:0 2px;padding:0 2px;border:0;border-bottom:1px dashed #b5944d;background:#fff9e9;color:#173f50;font-family:inherit;font-size:inherit;font-weight:600;line-height:inherit;cursor:pointer}.learning-word:hover,.learning-word.revealed{background:#fff0bd}.learning-word small{font:400 .72em/1.2 "Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#6d8079}
 .learning-preferences button{cursor:pointer;font-family:inherit}.learning-preferences button:disabled{opacity:.5;cursor:not-allowed}.learning-preferences button:focus-visible{outline:2px solid #79a998;outline-offset:3px}
 @media(max-width:700px){.learning-preferences{padding:18px 16px}.learning-dimension{grid-template-columns:1fr;gap:12px}.learning-quantity-note{grid-column:1}.learning-difficulty-options{gap:6px}.learning-difficulty-options button{padding:10px 8px}.learning-quantity-options{flex-wrap:wrap}}
 </style>

@@ -49,7 +49,8 @@ class ChatArtifacts:
             result = job.get('result') or {}
             tool = data.get('tool')
             if tool in ('plan', 'plan_revision') and result.get('beats'):
-                content = {key: copy.deepcopy(result.get(key)) for key in ('chapter_title','beats')}
+                content = {key: copy.deepcopy(result.get(key)) for key in
+                           ('chapter_title','beats','chapter_strategy','progress_review')}
                 object_kind, object_title = 'plan', content['chapter_title']
             elif tool == 'revise' and isinstance(result.get('candidate'), str) and result['candidate'].strip():
                 content = {'text':result['candidate'], 'original_source':result.get('original_source',result.get('source',''))}
@@ -72,7 +73,8 @@ class ChatArtifacts:
             rows.append(row)
         if saved.get('beats'):
             rows.append(self._row(f'saved:plan:{chapter}', 'plan', chapter, saved.get('chapter_title'),
-                {key:copy.deepcopy(saved.get(key)) for key in ('chapter_title','beats')}, 'saved'))
+                {key:copy.deepcopy(saved.get(key)) for key in
+                 ('chapter_title','beats','chapter_strategy','progress_review')}, 'saved'))
         if saved_text:
             rows.append(self._row(f'saved:text:{chapter}', 'text', chapter, title,
                                  {'text':saved_body,'original_source':saved_body}, 'saved', compatible_with_saved=True))

@@ -79,6 +79,32 @@ class ChapterRequest(BaseModel):
     revision: str = ""
     preview: dict = {}
     revision_mode: Literal["local", "whole", "polish"] = "local"
+    plan_revision_scope: Literal["local", "structural", "regenerate"] = "local"
+
+
+class BlueprintGenerateRequest(BaseModel):
+    model_name: str = ""
+    requirements: str = Field(default="", max_length=12000)
+    mode: Literal["create", "adjust", "regenerate"] = "create"
+
+
+class BlueprintSaveRequest(BaseModel):
+    blueprint: dict = Field(default_factory=dict)
+
+
+class BlueprintLockRequest(BaseModel):
+    collection: Literal["facts", "phases", "arcs", "milestones", "chapter_roadmap"]
+    key: str
+    locked: bool
+
+
+def _effective_revision_mode(requested: str, requirements: str) -> str:
+    """Promote broad prose changes to whole-chapter output, including resumes."""
+    if requested == "local" and re.search(
+            r"整章(?:改写|重写|修订)|全文(?:改写|重写|修订)|输出完整正文|保留[五六七八九十\d]+幕结构",
+            requirements or ""):
+        return "whole"
+    return requested
 
 
 class MiscConfig(BaseModel):
@@ -410,6 +436,167 @@ def register_features(app: FastAPI, workspace_root: str,
             raise HTTPException(500, "设定保存失败")
         return settings
 
+    @app.get("/api/projects/{project_id}/story-blueprint")
+    def get_story_blueprint(project_id: str):
+        from core.story_blueprint import (blueprint_path, dismissed_blueprint_candidate_job,
+                                          load_blueprint_candidate, load_story_blueprint,
+                                          save_blueprint_candidate)
+        path = project_path(project_id)
+        pending = load_blueprint_candidate(path)
+        candidate_error = ""
+        if pending is None:
+            dismissed_job = dismissed_blueprint_candidate_job(path)
+            accepted_mtime = blueprint_path(path).stat().st_mtime if blueprint_path(path).is_file() else 0
+            latest = next((job for job in jobs.list(path, limit=100)
+                           if job.get("kind") == "story_blueprint"
+                           and job.get("status") == "completed"
+                           and isinstance((job.get("result") or {}).get("candidate"), dict)
+                           and float(job.get("finished_epoch") or 0) > accepted_mtime), None)
+            if latest and str(latest.get("id") or "") != dismissed_job:
+                candidate = latest["result"]["candidate"]
+                try:
+                    save_blueprint_candidate(path, candidate, str(latest.get("id") or ""))
+                    pending = load_blueprint_candidate(path)
+                except ValueError as exc:
+                    candidate_error = str(exc)
+                    pending = None
+        latest_directions = next((job for job in jobs.list(path, limit=100)
+                                  if job.get("kind") == "story_blueprint_directions"
+                                  and job.get("status") == "completed"
+                                  and isinstance((job.get("result") or {}).get("directions"), list)
+                                  and len((job.get("result") or {}).get("directions") or []) == 3), None)
+        return {"exists": blueprint_path(path).is_file(),
+                "blueprint": load_story_blueprint(path),
+                "candidate": (pending or {}).get("candidate"),
+                "candidate_job_id": (pending or {}).get("job_id", ""),
+                "directions": ((latest_directions or {}).get("result") or {}).get("directions", []),
+                "candidate_error": candidate_error}
+
+    @app.delete("/api/projects/{project_id}/story-blueprint/candidate",
+                dependencies=[Depends(_write_required)])
+    def discard_story_blueprint_candidate(project_id: str):
+        from core.story_blueprint import discard_blueprint_candidate
+        discard_blueprint_candidate(project_path(project_id))
+        return {"discarded": True}
+
+    @app.put("/api/projects/{project_id}/story-blueprint/candidate",
+             dependencies=[Depends(_write_required)])
+    def put_story_blueprint_candidate(project_id: str, payload: BlueprintSaveRequest):
+        from core.story_blueprint import load_blueprint_candidate, save_blueprint_candidate
+        path = project_path(project_id)
+        pending = load_blueprint_candidate(path)
+        try:
+            if not save_blueprint_candidate(path, payload.blueprint,
+                                            str((pending or {}).get("job_id") or "")):
+                raise ValueError("蓝图候选保存失败")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        saved = load_blueprint_candidate(path)
+        return {"saved": True, "candidate": (saved or {}).get("candidate")}
+
+    @app.put("/api/projects/{project_id}/story-blueprint/lock",
+             dependencies=[Depends(_write_required)])
+    def put_story_blueprint_lock(project_id: str, payload: BlueprintLockRequest):
+        from core.story_blueprint import set_blueprint_item_lock
+        try:
+            return set_blueprint_item_lock(project_path(project_id), payload.collection,
+                                           payload.key, payload.locked)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.put("/api/projects/{project_id}/story-blueprint", dependencies=[Depends(_write_required)])
+    def put_story_blueprint(project_id: str, payload: BlueprintSaveRequest):
+        from core.story_blueprint import (load_blueprint_candidate, load_story_blueprint,
+                                          save_story_blueprint)
+        path = project_path(project_id)
+        blueprint = payload.blueprint
+        pending = load_blueprint_candidate(path)
+        pending_candidate = (pending or {}).get("candidate")
+        if isinstance(pending_candidate, dict):
+            submitted_rows = ((blueprint.get("plan") or {}).get("chapter_roadmap") or [])
+            pending_rows = ((pending_candidate.get("plan") or {}).get("chapter_roadmap") or [])
+            submitted_chapters = {row.get("chapter") for row in submitted_rows
+                                  if isinstance(row, dict) and type(row.get("chapter")) is int}
+            pending_chapters = {row.get("chapter") for row in pending_rows
+                                if isinstance(row, dict) and type(row.get("chapter")) is int}
+            # A page opened before server-side candidate recovery can still post
+            # the old partial route.  Prefer the newer persisted candidate only
+            # when it is a strict superset, preserving normal in-page edits.
+            if submitted_chapters and submitted_chapters < pending_chapters:
+                blueprint = pending_candidate
+        try:
+            if not save_story_blueprint(path, blueprint):
+                raise ValueError("蓝图保存失败")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"saved": True, "blueprint": load_story_blueprint(path)}
+
+    @app.get("/api/projects/{project_id}/story-blueprint/graph")
+    def get_story_blueprint_graph(project_id: str):
+        from core.story_blueprint import blueprint_graph_data
+        return blueprint_graph_data(project_path(project_id))
+
+    @app.post("/api/projects/{project_id}/story-blueprint/directions",
+              dependencies=[Depends(_write_required)])
+    def generate_story_blueprint_directions(project_id: str,
+                                            payload: BlueprintGenerateRequest):
+        from core.continuation import ContinuationLLM
+        from core.story_blueprint import generate_blueprint_directions
+        path = project_path(project_id)
+        settings = load_project_settings(path)
+        model_cfg = llm(payload.model_name)
+
+        def work(update, job_id):
+            chapter_number = max((number for number, _, _ in list_chapter_files(path)), default=0)
+            audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""), chapter_number,
+                                  secrets=(model_cfg.get("api_key", ""),))
+            update("正在整理高层事实并构思不同架构", {"log_path": str(audit.path)})
+            audit.write("blueprint_directions_started", requirements=payload.requirements)
+            try:
+                directions = generate_blueprint_directions(
+                    path, settings, ContinuationLLM(model_cfg), payload.requirements,
+                    audit=audit, progress=update)
+                audit.write("blueprint_directions_completed", directions=directions)
+                update("三种架构方向已生成，请选择后再展开完整蓝图")
+                return {"directions": directions, "log_path": str(audit.path)}
+            except Exception as exc:
+                audit.write("blueprint_directions_failed", error_type=type(exc).__name__,
+                            error=str(exc))
+                raise
+
+        return jobs.start(path, "story_blueprint_directions", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/story-blueprint/generate",
+              dependencies=[Depends(_write_required)])
+    def generate_story_blueprint(project_id: str, payload: BlueprintGenerateRequest):
+        from core.continuation import ContinuationLLM
+        from core.story_blueprint import generate_blueprint_candidate, save_blueprint_candidate
+        path = project_path(project_id)
+        settings = load_project_settings(path)
+        model_cfg = llm(payload.model_name)
+
+        def work(update, job_id):
+            chapter_number = max((number for number, _, _ in list_chapter_files(path)), default=0)
+            audit = PlanRunLogger(path, job_id, model_cfg.get("model_name", ""), chapter_number,
+                                  secrets=(model_cfg.get("api_key", ""),))
+            update("正在整理已写章节事实与现有故事线", {"log_path": str(audit.path)})
+            audit.write("blueprint_run_started", mode=payload.mode,
+                        requirements=payload.requirements)
+            try:
+                candidate = generate_blueprint_candidate(
+                    path, settings, ContinuationLLM(model_cfg), payload.requirements,
+                    audit=audit, progress=update, mode=payload.mode)
+                if not save_blueprint_candidate(path, candidate, job_id):
+                    raise ValueError("蓝图候选稿暂存失败")
+                audit.write("blueprint_run_completed", candidate=candidate)
+                update("蓝图候选稿已生成；确认后才会保存")
+                return {"candidate": candidate, "log_path": str(audit.path)}
+            except Exception as exc:
+                audit.write("blueprint_run_failed", error_type=type(exc).__name__, error=str(exc))
+                raise
+
+        return jobs.start(path, "story_blueprint", work, pass_job_id=True)
+
     @app.post("/api/projects/{project_id}/plan", dependencies=[Depends(_write_required)])
     def suggest_plan(project_id: str, payload: ChapterRequest):
         from core.continuation import ContinuationLLM
@@ -499,7 +686,9 @@ def register_features(app: FastAPI, workspace_root: str,
         plan = {key: state["settings"].get(key, "") for key in ("chapter_brief", "chapter_requirements")}
         plan['planning_input_origin'] = {'kind':'task_request',
             'request':str(state['settings'].get('_planning_request') or ''), 'source_job':job_id}
-        plan.update({key: result[key] for key in ("chapter_title", "beats", "planning_review")})
+        plan.update({key: result[key] for key in
+                     ("chapter_title", "beats", "chapter_strategy", "progress_review", "planning_review")
+                     if key in result})
         settings.setdefault("chapter_plans", {})[str(number)] = plan
         if int(settings.get("chapter_number") or 0) == number:
             settings.update({key: plan[key] for key in ("chapter_title", "beats")})
@@ -547,7 +736,9 @@ def register_features(app: FastAPI, workspace_root: str,
                 audit.write('work_object_selected', **payload.work_object)
             return revise_chapter_plan(settings, ContinuationLLM(model_cfg), num_beats,
                                        payload.requirements, previous, wiki,
-                                       progress=lambda message: update(message), audit=audit)
+                                       progress=lambda message: update(message), audit=audit,
+                                       revision_scope=payload.plan_revision_scope,
+                                       project_dir=path)
         return jobs.start(path, "plan_revision", work, pass_job_id=True)
 
     @app.post("/api/projects/{project_id}/book-rules", dependencies=[Depends(_write_required)])
@@ -731,6 +922,8 @@ def register_features(app: FastAPI, workspace_root: str,
                 chapter_title=payload.title or settings.get("chapter_title") or "",
                 beats=beats, embedding_cfg=embedding,
                 progress=lambda stage, data: update(stage, data))
+            from core.story_blueprint import invalidate_story_blueprint
+            invalidate_story_blueprint(path, payload.number)
             save_review_session(path, payload.number, result["chapter_title"], result["beat_drafts"])
             # 工程已有向量库时，生成完成即按章替换，避免新章无法被后续 RAG 检索。
             store = Path(path) / "vectorstore"
@@ -907,7 +1100,8 @@ def register_features(app: FastAPI, workspace_root: str,
         else:
             original_source = source
         requirements = payload.requirements
-        if payload.revision_mode == "polish":
+        revision_mode = _effective_revision_mode(payload.revision_mode, requirements)
+        if revision_mode == "polish":
             from core.prose_polish import polish_requirements
             requirements = polish_requirements(requirements)
         if not requirements.strip():
@@ -934,7 +1128,7 @@ def register_features(app: FastAPI, workspace_root: str,
                 initial={"source": source, "title": title, "requirements": requirements,
                          "settings": settings, "chapter_number": payload.number,
                          "model_name": payload.model_name, "attempt": 0,
-                         "revision_mode": payload.revision_mode,
+                         "revision_mode": revision_mode,
                          "original_source": original_source, "baseline": baseline})
 
         return jobs.start(path, "revise", work, pass_job_id=True)
@@ -964,10 +1158,18 @@ def register_features(app: FastAPI, workspace_root: str,
         def work(update, new_job_id):
             audit = PlanRunLogger(path, new_job_id, model_cfg.get("model_name", ""),
                                   state["chapter_number"], secrets=(model_cfg.get("api_key", ""),))
-            update("从 LangGraph 检查点继续修订", {"workflow_thread": thread_id,
+            resume_mode = _effective_revision_mode(
+                str(state.get("revision_mode") or "local"), str(state.get("requirements") or ""))
+            promoted = resume_mode != state.get("revision_mode")
+            workflow_thread = new_job_id if promoted else thread_id
+            update("改动范围较大，已从局部补丁切换为整章修订" if promoted
+                   else "从 LangGraph 检查点继续修订", {"workflow_thread": workflow_thread,
                    "model_name": state["model_name"], "chapter_number": state["chapter_number"],
                    "log_path": str(audit.path)})
-            return run_revision_workflow(path, thread_id, ContinuationLLM(model_cfg), update, audit)
+            initial = ({**state, "revision_mode": resume_mode, "candidate": "",
+                        "mechanical_issues": [], "issues": []} if promoted else None)
+            return run_revision_workflow(path, workflow_thread, ContinuationLLM(model_cfg),
+                                         update, audit, initial=initial)
         return jobs.start(path, "revise", work, pass_job_id=True)
 
     @app.post("/api/projects/{project_id}/revise/check", dependencies=[Depends(_write_required)])
@@ -1424,13 +1626,18 @@ def register_features(app: FastAPI, workspace_root: str,
                               plan_baseline=data.get('plan_baseline', {}),
                               work_object=data.get('work_object', {}),
                               revision_source=data.get('revision_source'),
-                              requirements=data.get('requirements', ''))
+                              requirements=data.get('requirements', ''),
+                              plan_revision_scope=data.get('revision_scope', 'local'))
     def chat_illustration(project,data):
         settings = settings_for_chapter(load_project_settings(project_path(project)),data['chapter'])
         notes = str(settings.get('illustration_style_notes') or '')
         requirements = str(data.get('requirements') or '').strip()
         preview = {'illustration_style_notes':(notes+'\n'+requirements).strip()} if requirements else {}
         return generate_illustration(project,data['chapter'],{'model_name':data['model_name'],'preview':preview})
+    def chat_blueprint(project,data):
+        return generate_story_blueprint(project, BlueprintGenerateRequest(
+            model_name=data['model_name'], requirements=data.get('requirements', ''),
+            mode=data.get('blueprint_mode', 'create')))
     register_chat(app, workspace_root, project_path, llm, {
         'plan': lambda project, data: suggest_plan(project, chat_request(data)),
         'plan_revision': lambda project, data: revise_plan(project, chat_request(data)),
@@ -1440,6 +1647,7 @@ def register_features(app: FastAPI, workspace_root: str,
         'consistency': lambda project, data: consistency(project, chat_request(data)),
         'revise': lambda project, data: revise(project, chat_request(data)),
         'illustration': chat_illustration,
+        'blueprint': chat_blueprint,
     }, jobs, _write_required, resume_tools={
         'plan': lambda project, job_id, data: resume_plan(project,job_id,{'model_name':data['model_name']}),
         'revise': lambda project, job_id, data: resume_revision(project,job_id,{'model_name':data['model_name']}),

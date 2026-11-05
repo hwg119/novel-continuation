@@ -9,6 +9,7 @@ const DeveloperPanel = defineAsyncComponent(() => import('./DeveloperPanel.vue')
 import ConfigPanel from './ConfigPanel.vue'
 import WikiPanel from './WikiPanel.vue'
 import RelationGraphPanel from './RelationGraphPanel.vue'
+const BlueprintPanel = defineAsyncComponent(() => import('./BlueprintPanel.vue'))
 import HomePanel from './HomePanel.vue'
 import AsyncPageNotice from './AsyncPageNotice.vue'
 const ChatPanel = defineAsyncComponent({
@@ -38,7 +39,7 @@ type ChapterSummary = { number: number; text: string; exists: boolean; valid: bo
 type ChapterIllustration = { exists: boolean; svg: string; png?: string }
 type ChapterSearchResult = { chapter: number; segment: number; text: string; relevance: number;
   semantic_score: number | null; matched_terms: string[]; constraint_mode: string }
-type Tab = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config' | 'developer'
+type Tab = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'blueprint' | 'projects' | 'quality' | 'wiki' | 'relationships' | 'runs' | 'config' | 'developer'
 type GenerationRequest = { number: number; title: string; beatsLimit: number | null }
 type PendingGeneration = { request: GenerationRequest; overwrite: boolean; modelName: string }
 type NavItem = { id: Tab; label: string; icon: string }
@@ -50,6 +51,7 @@ const navGroups: { label: string; items: NavItem[] }[] = [
   ] },
   { label: '创作', items: [
     { id: 'write', label: '小说正文', icon: 'M4 5.5c2.7-.8 5.3-.4 8 1.2v13c-2.7-1.6-5.3-2-8-1.2zM20 5.5c-2.7-.8-5.3-.4-8 1.2v13c2.7-1.6 5.3-2 8-1.2z' },
+    { id: 'blueprint', label: '故事蓝图', icon: 'M4 5h16v14H4zM8 5v14M8 10h12M13 10v9' },
     { id: 'settings', label: '续写与分幕', icon: 'm5 19 3.7-1 9.9-9.9-2.7-2.7L6 15.3 5 19ZM14.5 6.8l2.7 2.7' },
     { id: 'quality', label: '审校与修订', icon: 'M5 4h10l4 4v12H5zM15 4v4h4M8 12h8M8 16h5' },
   ] },
@@ -621,6 +623,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
     </div></div></template>
   <RevisionPanel v-else-if="activeTab === 'revision' && chapterNumber !== null" :project-id="projectId" :chapter-number="chapterNumber" :current-text="text" @back="activeTab = 'write'" />
   <SettingsPanel v-else-if="activeTab === 'settings'" :project-id="projectId" :model-name="modelName" :current-chapter="settingsChapter || chapterNumber" :generating="generating" @task="taskStarted" @chapter="settingsChapter = $event" @generate="generate" />
+  <BlueprintPanel v-else-if="activeTab === 'blueprint'" :project-id="projectId" :model-name="modelName" @task="taskStarted" />
   <ProjectsPanel v-else-if="activeTab === 'projects'" :project-id="projectId" :project-name="project?.name || ''" @changed="loadProjects()" @task="taskStarted" />
   <QualityPanel v-else-if="activeTab === 'quality'" :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName" :text="text" :revision="revision" :dirty="dirty" @task="taskStarted" @apply="applyRevision" />
   <WikiPanel v-else-if="activeTab === 'wiki'" :project-id="projectId" :model-name="modelName" :models="models" :current-chapter="chapterNumber" :focus-subject="wikiFocusSubject" @task="taskStarted" @open-chapter="openWikiChapter" @open-graph="activeTab = 'relationships'" @updated="wikiPendingCount = $event" />

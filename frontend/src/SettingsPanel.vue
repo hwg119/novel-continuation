@@ -18,6 +18,8 @@ const error = ref('')
 const running = ref(false)
 const activeTask = ref<'plan' | 'plan-revise' | 'book-rules' | ''>('')
 const planningReview = ref<Record<string, any> | null>(null)
+const chapterStrategy = ref<Record<string, any> | null>(null)
+const progressReview = ref<Record<string, any> | null>(null)
 const reviewLabels: Record<string, string> = {
   initial_review_only: '已完成初审，未做后验收', passed: '重写后验收通过',
   patched_pending_review: '已局部修补，待确认', needs_review: '验收发现问题，待确认',
@@ -25,6 +27,7 @@ const reviewLabels: Record<string, string> = {
   editorial_pending_review: '已做文字规范，待确认',
 }
 const revisionIssues = ref('')
+const revisionScope = ref<'local' | 'structural'>('local')
 const startingContinuation = ref(false)
 const illustrationSvg = ref('')
 const illustrationPng = ref('')
@@ -86,6 +89,8 @@ function planFor(number: number) {
   settings.value.chapter_brief = plan.chapter_brief || ''
   settings.value.chapter_requirements = plan.chapter_requirements || ''
   planningReview.value = plan.planning_review || null
+  chapterStrategy.value = plan.chapter_strategy || null
+  progressReview.value = plan.progress_review || null
   beatsText.value = (plan.beats || []).map((beat: any) =>
     `${beat.num || ''} | ${beat.name || ''} | ${beat.desc || ''}`).join('\n')
   void loadIllustration(number)
@@ -123,6 +128,7 @@ async function save(showToast = true): Promise<boolean> {
   settings.value.chapter_plans[String(chapter.value)] = {
     chapter_title: settings.value.chapter_title || '', chapter_brief: settings.value.chapter_brief || '',
     chapter_requirements: settings.value.chapter_requirements || '', beats: settings.value.beats,
+    chapter_strategy: chapterStrategy.value, progress_review: progressReview.value,
     planning_review: planningReview.value }
   try { settings.value = await api(`/api/projects/${props.projectId}/settings`, writeOptions('PUT', settings.value))
     if (showToast) toastMessage.value = '续写设定已保存'
@@ -149,6 +155,7 @@ async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
     const started = await api<{ id: string }>(`/api/projects/${props.projectId}/${route}`,
       writeOptions('POST', { number: chapter.value, model_name: props.modelName,
         requirements: kind === 'plan-revise' ? revisionIssues.value.trim() : '',
+        plan_revision_scope: kind === 'plan-revise' ? revisionScope.value : 'local',
         preview: { background: settings.value.background, character_voices: settings.value.character_voices,
           extra_requirements: settings.value.extra_requirements, source_novel: settings.value.source_novel,
           chapter_brief: settings.value.chapter_brief, chapter_requirements: settings.value.chapter_requirements,
@@ -164,6 +171,8 @@ async function start(kind: 'plan' | 'plan-revise' | 'book-rules') {
       if (kind === 'plan' || kind === 'plan-revise') {
         settings.value.chapter_title = String(job.result.chapter_title || '')
         planningReview.value = job.result.planning_review || null
+        chapterStrategy.value = job.result.chapter_strategy || null
+        progressReview.value = job.result.progress_review || null
         beatsText.value = ((job.result.beats || []) as any[]).map(beat =>
           `${beat.num} | ${beat.name} | ${beat.desc}`).join('\n')
         mode.value = 'chapter'
@@ -282,6 +291,15 @@ onMounted(() => { void load() })
       <label class="check"><input v-model="settings.traditional" type="checkbox">繁体输出</label>
     </section></div>
   <template v-else><section class="panel chapter-settings"><h2>第 {{ chapter }} 章规划</h2>
+    <details v-if="chapterStrategy" class="outline-source" open><summary>本章故事策略</summary>
+      <p><strong>章节作用：</strong>{{ chapterStrategy.chapter_role }}</p>
+      <p><strong>主线变化：</strong>{{ chapterStrategy.primary_change }}</p>
+      <p v-if="chapterStrategy.secondary_change"><strong>支线变化：</strong>{{ chapterStrategy.secondary_change }}</p>
+      <p><strong>核心选择：</strong>{{ chapterStrategy.central_choice || '由具体场景自然形成' }}</p>
+      <p><strong>章末变化：</strong>{{ chapterStrategy.ending_change }}</p>
+      <p v-if="chapterStrategy.avoid_repeating?.length"><strong>避免重复：</strong>{{ chapterStrategy.avoid_repeating.join('；') }}</p>
+      <p v-if="progressReview?.summary" class="muted-note">跨章推进判断：{{ progressReview.summary }}</p>
+    </details>
     <p v-if="planningReview" class="muted-note">规划检查：{{ reviewLabels[planningReview.status] || planningReview.status }}。编辑后请结合正文核对。</p>
     <div v-if="planningReview?.source === 'user_revision'" :class="['notice', { error: planningReview.status !== 'passed' }]" role="status">
       <strong>{{ planningReview.status === 'passed' ? '修订要求验收通过' : planningReview.status === 'incomplete' ? '候选已生成，请人工核对' : '仍有修改要求未落实' }}</strong>
@@ -293,7 +311,7 @@ onMounted(() => { void load() })
       <p v-for="(note, index) in planningReview.editorial_notes" :key="index" class="muted-note">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
     </details>
     <div class="inline-fields"><label>章号<input v-model.number="chapter" type="number" min="1" @change="planFor(chapter); emit('chapter', chapter)"></label>
-      <label>规划幕数<input v-model.number="settings.beats_per_chapter" type="number" min="1" max="12"></label></div>
+          <label>默认规划幕数<input v-model.number="settings.beats_per_chapter" type="number" min="1" max="12"></label></div>
     <label>本章回目<input v-model="settings.chapter_title"></label>
     <label>本章目标<textarea v-model="settings.chapter_brief" rows="4"></textarea></label>
     <label>本章专属要求<textarea v-model="settings.chapter_requirements" rows="4"></textarea></label>
@@ -301,10 +319,11 @@ onMounted(() => { void load() })
       <button :disabled="running || !modelName" @click="generatePlan"><span v-if="activeTask === 'plan'" class="button-spinner" aria-hidden="true"></span>{{ activeTask === 'plan' ? '正在生成回目与分幕…' : 'AI 提取回目与分幕' }}</button></div>
     <section v-if="beatViews.length" class="plan-revision-box">
       <div class="revision-copy"><span class="revision-mark">定向修订</span><div><h3>把发现的问题交回给模型</h3>
-        <p>逐条写明冲突、重复、节奏或人物行为问题；未提及的内容会尽量保留。</p></div></div>
+        <p>{{ revisionScope === 'local' ? '修补具体幕的冲突、措辞或行为问题，未提及内容会尽量保留。' : '保留已写正文事实，但放弃当前分幕结构，重新确定本章在长期故事中的推进作用。' }}</p></div></div>
+      <label>修订范围<select v-model="revisionScope"><option value="local">局部修补</option><option value="structural">整章重构（解决节奏与原地打转）</option></select></label>
       <textarea v-model="revisionIssues" rows="5" placeholder="例如：&#10;1. 第一幕与第三幕功能重复，请合并；&#10;2. 第二幕地点与工程设定冲突，请修正；&#10;3. 调查线索出现得太顺利，增加一个无法立即确认的歧义。"></textarea>
       <div class="revision-actions"><small>修订结果不会自动保存，可先检查新旧分幕。</small>
-        <button :disabled="running || !modelName || !revisionIssues.trim()" @click="revisePlan"><span v-if="activeTask === 'plan-revise'" class="button-spinner" aria-hidden="true"></span>{{ activeTask === 'plan-revise' ? '修订中…' : '按问题修改分幕' }}</button></div>
+        <button :disabled="running || !modelName || !revisionIssues.trim()" @click="revisePlan"><span v-if="activeTask === 'plan-revise'" class="button-spinner" aria-hidden="true"></span>{{ activeTask === 'plan-revise' ? '修订中…' : revisionScope === 'structural' ? '重新设计整章' : '按问题修改分幕' }}</button></div>
     </section>
     <div v-if="beatViews.length" class="beat-outline" aria-label="分幕大纲">
       <article v-for="(beat, index) in beatViews" :key="`${beat.num}-${index}`" class="outline-beat">

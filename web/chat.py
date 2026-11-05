@@ -109,10 +109,11 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
             'plan_baseline':data.get('plan_baseline'),
             'work_object':data.get('work_object'),
             'view':{'plan':'settings','plan_revision':'settings','generate':'write',
-                    'consistency':'quality','revise':'quality','illustration':'settings'}[data['tool']],
+                    'consistency':'quality','revise':'quality','illustration':'settings',
+                    'blueprint':'blueprint'}[data['tool']],
             'tool':data['tool'],'model':data.get('model'),'can_resume':job.get('can_resume',False),
             'elapsed_seconds':job.get('elapsed_seconds'), 'result':{k:result[k] for k in
-                ('chapter_title','beats','planning_review','report','revision_requirements','candidate',
+                ('chapter_title','beats','chapter_strategy','progress_review','planning_review','report','revision_requirements','candidate',
                  'story_summary','story_enhancements','issues') if k in result}}
 
     def session(project_id, ident):
@@ -186,6 +187,22 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                     'chapters': [{'number': n, 'file': name} for n, name, _ in files[-15:]],
                     'plan': settings_for_chapter(settings, chapter) if chapter else {},
                     'conversation': history_text[-18:]}
+                from core.story_blueprint import load_blueprint_candidate, load_story_blueprint
+                accepted_blueprint = load_story_blueprint(path)
+                pending_blueprint = load_blueprint_candidate(path)
+                context['story_blueprint'] = {
+                    'source_state':'accepted_long_range_plan',
+                    'facts_through_chapter':accepted_blueprint.get('facts_through_chapter',0),
+                    'plan':accepted_blueprint.get('plan') or {},
+                    'fact_statements':[row.get('statement') for row in (accepted_blueprint.get('facts') or [])[-12:]],
+                }
+                if pending_blueprint:
+                    pending_value = pending_blueprint['candidate']
+                    context['story_blueprint_candidate'] = {
+                        'source_state':'candidate_not_applied',
+                        'plan':pending_value.get('plan') or {},
+                        'proposals':pending_value.get('proposals') or [],
+                    }
                 previous_context = enrich_chat_context(context, path, chapter)
                 if chapter:
                     context['plan'], context['plan_baseline'] = chat_plan_baseline(
@@ -246,6 +263,8 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                         store.emit(ident,'progress',{'turn_id':turn,'text':'已确定工作对象', 'details':baseline_data['work_object']})
                     action_id = store.action(ident, {**baseline_data, 'tool': tool, 'chapter': number,
                         'requirements': requirements, 'model_name': payload.model_name,
+                        'revision_scope': (decision.get('revision_scope') or 'local') if tool == 'plan_revision' else 'local',
+                        'blueprint_mode': (decision.get('blueprint_mode') or 'create') if tool == 'blueprint' else None,
                         'original_user_request': payload.text.strip(),
                         'source_request_turn':decision.get('source_request_turn'),
                         'model_interpretation': str(decision.get('requirements') or '')[:5000],
@@ -324,7 +343,8 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         settings = load_project_settings(path)
         from core.plan_inputs import saved_plan_input
         plan = saved_plan_input(settings_for_chapter(settings,data['chapter']), data)
-        plan.update({k:job['result'].get(k) for k in ('chapter_title','beats','planning_review')})
+        plan.update({k:job['result'].get(k) for k in
+                     ('chapter_title','beats','chapter_strategy','progress_review','planning_review')})
         settings.setdefault('chapter_plans',{})[str(data['chapter'])] = plan
         if int(settings.get('chapter_number') or 0) == data['chapter']: settings.update(plan)
         if not save_project_settings(path,settings): raise HTTPException(500,'规划保存失败')
@@ -443,6 +463,7 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
         if tool not in tools: raise HTTPException(400, '当前服务不支持此分幕操作')
         data = {'tool':tool,'chapter':number,'model_name':payload.model_name,
             'model':config.get('model_name'), 'plan_before':plan_hash(path, number),
+            'revision_scope':'structural' if tool == 'plan_revision' else 'local',
             'requirements':PLAN_PREMISE_GUIDANCE + '\n根据以下讨论生成或修改本章分幕。若建议包含备选方案，优先采用回复明确推荐的组合，不将全部备选同时叠加；忽略页面跳转说明。\n' + reply,
             'message':'在对话中按这条建议处理分幕，生成候选稿后由用户保存。', 'source_reply':turn}
         if tool == 'plan_revision':

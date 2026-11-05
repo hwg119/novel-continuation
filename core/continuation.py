@@ -1039,7 +1039,7 @@ def _first_json_object(raw: str) -> dict:
 
 def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
                        temperature: float = 0.3, audit=None,
-                       stage: str = "draft") -> dict:
+                       stage: str = "draft", allow_flexible_count: bool = False) -> dict:
     """请求并解析一份章节规划；这里只处理传输格式，不替代剧情审查。"""
     last_error = "模型未返回章节规划 JSON"
     from core.agent_skill import skill_guidance
@@ -1053,7 +1053,10 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
     # A six-beat plan with evidence fields regularly exceeds the old 2760-token
     # limit on verbose models. Keep the request within the user's provider limit,
     # while reserving enough room to close the complete JSON object.
-    output_budget = min(configured_budget, max(4096, num_beats * 720))
+    flexible_min = max(1, num_beats - 1)
+    flexible_max = min(12, num_beats + 1)
+    output_budget = min(configured_budget, max(
+        4096, (flexible_max if allow_flexible_count else num_beats) * 720))
     for attempt in range(attempts):
         request = prompt if attempt == 0 else (
             f"上次输出无法解析或结构不完整：{last_error}。"
@@ -1084,7 +1087,13 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
         try:
             from core.structured_output import validate_chapter_plan
             data = validate_chapter_plan(_first_json_object(raw))
-            issues = _chapter_plan_issues(data, num_beats, "")
+            actual_count = len(data.get("beats") or [])
+            if allow_flexible_count and flexible_min <= actual_count <= flexible_max:
+                issues = _chapter_plan_issues(data, actual_count, "")
+            elif allow_flexible_count:
+                issues = [f"分幕数量应在 {flexible_min}～{flexible_max} 幕之间"]
+            else:
+                issues = _chapter_plan_issues(data, num_beats, "")
             if audit:
                 audit.write("structure_check", stage=stage, attempt=attempt + 1,
                             passed=not issues, issues=issues,
@@ -1104,6 +1113,97 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
                             error=last_error, likely_truncated=bool(stripped and not stripped.endswith("}")),
                             output_budget=output_budget)
     raise ValueError(last_error)
+
+
+def _request_story_direction(settings: dict, llm: ContinuationLLM,
+                             project_dir: str | None, audit=None,
+                             feedback: str = "", recent_context: str = "") -> dict:
+    """Build a chapter strategy from durable cross-chapter movement."""
+    from core.agent_skill import skill_guidance
+    from core.story_state import story_direction_context, save_story_state
+    from core.structured_output import validate_story_direction
+    chapter_number = int(settings.get("chapter_number") or 0)
+    context = (story_direction_context(project_dir, chapter_number)
+               if project_dir and chapter_number else {
+                   "stored_state": {}, "latest_saved_chapter": max(0, chapter_number - 1),
+                   "recent_summaries": []})
+    guidance = skill_guidance("story-direction", audit=audit, stage="story_direction")
+    prompt = f"""{guidance}
+
+【目标章节】第 {chapter_number} 章
+【全书背景】
+{settings.get('background', '')}
+【全书附加规则】
+{settings.get('extra_requirements', '')}
+【长期故事状态与最近章节摘要】
+{json.dumps(context, ensure_ascii=False)}
+【近期连续性正文与摘要｜事实依据，不是必须照搬的情节模板】
+{recent_context[:7500] or '（未提供）'}
+【本章已有目标】
+{settings.get('chapter_brief', '') or '（尚未填写，由你根据长期故事状态提出）'}
+【用户本次要求】
+{current_creation_request(settings) or '（无额外要求）'}
+【上一轮推进审查反馈】
+{feedback or '（首次制定策略）'}
+
+输出 JSON：
+{{"story_state":{{"updated_through_chapter":整数,"story_phase":{{"name":"阶段","current_pressure":"当前压力","expected_transition":"下一步变化"}},"arcs":[{{"id":"稳定短标识","name":"故事线","priority":"primary或secondary","current_state":"当前状态","last_material_change_chapter":整数,"recent_methods":["近期反复使用的场景功能"],"open_questions":["读者期待"],"next_pressure":"下一步压力"}}],"recent_chapter_changes":[{{"chapter":整数,"material_changes":["实质变化"],"scene_functions":["场景功能"]}}]}},"strategy":{{"chapter_role":"本章作用","primary_arc":"主线标识","secondary_arc":"支线标识或空","primary_change":"主线必须发生的变化","secondary_change":"支线的人物变化或空","opening_pressure":"开场压力","central_choice":"核心选择","cost":"选择的代价或风险","ending_change":"章末局面变化","reader_question_before":"章前读者问题","reader_question_after":"章后升级的问题","avoid_repeating":["应避免重复的场景功能"]}}}}
+
+story_state 只根据已保存章节更新；strategy 可以采用用户对未来情节的要求。story_blueprint 中 facts 是正文依据，plan 是未来目标而非已经发生的事件；优先遵守锁定的阶段、故事线、里程碑和章节路线，但不得把规划节点写进历史状态。最近章节变化只保留最近 6 章。只输出完整 JSON。"""
+    result = None
+    last_error = "模型未返回故事方向 JSON"
+    for attempt in range(2):
+        request = prompt if attempt == 0 else (
+            f"上次故事方向无法解析：{last_error}。请压缩说明并重新输出完整 JSON；"
+            "不要输出分析过程、Markdown 或额外字段说明。\n\n" + prompt)
+        if audit:
+            audit.write("story_direction_request", attempt=attempt + 1,
+                        prompt_chars=len(request), prompt=request)
+        raw = llm.complete(request, system="你是长篇小说故事主编，只输出 JSON。",
+                           temperature=0.25 if attempt == 0 else 0.1,
+                           num_predict=3200, disable_thinking=True)
+        if audit:
+            audit.write("story_direction_response", attempt=attempt + 1,
+                        response_chars=len(raw or ""), raw_response=raw)
+        try:
+            result = validate_story_direction(_first_json_object(raw))
+            break
+        except ValueError as exc:
+            last_error = str(exc)
+    if result is None:
+        raise ValueError(last_error)
+    state = result["story_state"]
+    state["updated_through_chapter"] = int(context.get("latest_saved_chapter") or 0)
+    state["recent_chapter_changes"] = list(state.get("recent_chapter_changes") or [])[-6:]
+    if project_dir:
+        save_story_state(project_dir, state)
+    return result
+
+
+def _review_story_progress(llm: ContinuationLLM, plan: dict, strategy: dict,
+                           story_state: dict, audit=None) -> dict:
+    """Judge semantic movement across chapters without token/date heuristics."""
+    from core.agent_skill import skill_guidance
+    from core.structured_output import validate_progress_review
+    guidance = skill_guidance("story-direction", audit=audit, stage="progress_review")
+    prompt = f"""{guidance}
+
+【本章策略】
+{json.dumps(strategy, ensure_ascii=False)}
+【近期故事状态】
+{json.dumps(story_state, ensure_ascii=False)}
+【当前候选分幕】
+{json.dumps(plan, ensure_ascii=False)}
+
+忽略人物名、地点、日期和道具名称，比较实际场景功能。判断候选是否实现本章策略，并让人物目标、阻力、选择、代价、关系或局面至少一项发生可感变化。不要因为保持谜团或安静场景就判失败。
+只输出 JSON：{{"progressed":true或false,"summary":"整体判断","repeated_functions":[{{"current_beats":[幕号],"previous_chapters":[章号],"reason":"实际重复功能"}}],"missing_change":"缺失的实质变化或空","strategy_revision":"未推进时应怎样调整章节策略；已推进时为空"}}。"""
+    if audit:
+        audit.write("progress_review_request", prompt_chars=len(prompt), prompt=prompt)
+    raw = llm.complete(prompt, system="你只判断跨章节故事推进并输出 JSON。",
+                       temperature=0.1, num_predict=1400, disable_thinking=True)
+    if audit:
+        audit.write("progress_review_response", response_chars=len(raw or ""), raw_response=raw)
+    return validate_progress_review(_first_json_object(raw))
 
 
 def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
@@ -1272,8 +1372,15 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         if stage_runner:
             return stage_runner(name, lambda: function(*args, **kwargs))
         return function(*args, **kwargs)
+    if progress:
+        progress("正在判断长期故事阶段与本章实质变化（策略阶段）")
+    direction = run_stage("strategy", _request_story_direction,
+                          settings, llm, project_dir, audit=audit,
+                          recent_context=previous_context)
+    story_state = direction["story_state"]
+    chapter_strategy = direction["strategy"]
     prompt = f"""【程序指定目标章节】
-第 {settings.get('chapter_number', '')} 章；恰好 {num_beats} 幕。
+第 {settings.get('chapter_number', '')} 章；建议 {num_beats} 幕，可根据本章实际事件密度在 {max(1, num_beats - 1)}～{min(12, num_beats + 1)} 幕内选择。每幕必须有独立作用，不得为了凑数拆分同一事件。
 【全书背景】
 {settings.get('background', '')}
 【全书附加规则】
@@ -1284,13 +1391,17 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {wiki_history[:2200] or '（未提供）'}
 【结构化连续性状态｜人物、物件及关系的已知边界】
 {json.dumps(continuity_records, ensure_ascii=False)}
+【长期故事状态｜用于判断跨章推进，不替代正文事实】
+{json.dumps(story_state, ensure_ascii=False)}
+【本章策略｜各幕共同实现的变化】
+{json.dumps(chapter_strategy, ensure_ascii=False)}
 【本章目标】
 {settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
 {planning_input_prompt(settings)}
 只返回完整规划 JSON。"""
 
     if progress:
-        progress("正在生成章节规划初稿（第 1/4 阶段）")
+        progress("正在根据章节策略生成分幕初稿")
     if audit:
         audit.write("context_prepared", num_beats=num_beats,
                     target_chapter_number=settings.get("chapter_number"),
@@ -1305,12 +1416,55 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         audit.write('planning_input_layers', **planning_inputs(settings))
     try:
         draft = run_stage("draft", _request_plan_json, llm, prompt, num_beats, temperature=0.4,
-                                   audit=audit, stage="draft")
+                          audit=audit, stage="draft", allow_flexible_count=True)
     except ValueError as exc:
         raise ValueError(f"章节规划初稿未通过：{exc}") from exc
+    preferred_beats = num_beats
+    num_beats = len(draft.get("beats") or [])
+    if audit and num_beats != preferred_beats:
+        audit.write("beat_count_selected", preferred_count=preferred_beats,
+                    actual_count=num_beats, policy="flexible_initial_plan")
+    if progress and num_beats != preferred_beats:
+        progress(f"模型按本章结构选择了 {num_beats} 幕，继续进行内容审查")
 
     if progress:
-        progress("正在独立审查重复情节与连续性（第 2/4 阶段）")
+        progress("正在比较近期章节功能与本章实质推进")
+    try:
+        progress_review = run_stage("progress_review", _review_story_progress,
+                                    llm, draft, chapter_strategy, story_state, audit=audit)
+    except Exception as exc:
+        progress_review = {"progressed": True,
+                           "summary": "跨章推进审查未完成，候选仍交由连续性审查。",
+                           "repeated_functions": [], "missing_change": "",
+                           "strategy_revision": "", "check_failed": str(exc)}
+        if audit:
+            audit.write("progress_review_incomplete", error_type=type(exc).__name__, error=str(exc))
+    if not progress_review.get("progressed"):
+        if progress:
+            progress("候选仍在重复近期场景功能，正在调整章节策略并重新规划一次")
+        feedback = (str(progress_review.get("summary") or "") + "\n" +
+                    str(progress_review.get("missing_change") or "") + "\n" +
+                    str(progress_review.get("strategy_revision") or ""))
+        revised_direction = run_stage("strategy_retry", _request_story_direction,
+                                      settings, llm, project_dir, audit=audit, feedback=feedback,
+                                      recent_context=previous_context)
+        story_state = revised_direction["story_state"]
+        old_strategy_json = json.dumps(chapter_strategy, ensure_ascii=False)
+        chapter_strategy = revised_direction["strategy"]
+        prompt = prompt.replace(old_strategy_json,
+                                json.dumps(chapter_strategy, ensure_ascii=False), 1)
+        draft = run_stage("redraft", _request_plan_json, llm, prompt, num_beats,
+                          temperature=0.45, audit=audit, stage="draft")
+        try:
+            progress_review = run_stage("progress_recheck", _review_story_progress,
+                                        llm, draft, chapter_strategy, story_state, audit=audit)
+        except Exception as exc:
+            progress_review = {"progressed": True,
+                               "summary": "重新规划已完成，跨章复核未完成。",
+                               "repeated_functions": [], "missing_change": "",
+                               "strategy_revision": "", "check_failed": str(exc)}
+    if progress:
+        progress("正在独立审查连续性、因果与证据边界")
     review_issues = run_stage("review", _review_chapter_plan,
         llm, draft, num_beats, previous_context, wiki_history,
         str(settings.get('chapter_brief') or ''), audit=audit, project_dir=project_dir,
@@ -1326,7 +1480,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         if progress:
             progress(f"审查发现 {len(substantive_issues)} 个剧情问题、"
                      f"{len(review_issues) - len(substantive_issues)} 个编辑提醒，"
-                     "正在定向重写（第 3/4 阶段）")
+                     "正在定向重写")
             for item in review_issues:
                 scope = str(item.get("scope") or "相关分幕").strip()
                 severity = str(item.get("severity") or "medium").lower()
@@ -1387,7 +1541,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                 progress("提醒：文字修补未完成，保留初稿；详见完整日志")
     if data is not draft and final_source != "editorial_patch":
         if progress:
-            progress("正在验收重写后的规划（第 4/4 阶段）")
+            progress("正在验收重写后的规划")
         acceptance = run_stage("acceptance", _validate_rewritten_plan,
             llm, draft, data, [item for item in review_issues if item.get("evidence_verified")],
             num_beats, previous_context, audit=audit, creative_request=creative_request)
@@ -1493,6 +1647,23 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                         progress("提醒：后验收文字规范未完成，保留通过剧情验收的版本和提醒")
     elif audit:
         audit.write("acceptance_skipped", reason="初审未触发有效重写")
+    if data is not draft:
+        try:
+            progress_review = run_stage("final_progress_review", _review_story_progress,
+                                        llm, data, chapter_strategy, story_state, audit=audit)
+            if not progress_review.get("progressed"):
+                validation_status = "needs_review"
+                all_editorial_notes.append({
+                    "scope": "跨章故事推进",
+                    "problem": progress_review.get("summary") or "当前候选仍与近期章节功能重复",
+                    "suggestion": progress_review.get("strategy_revision") or
+                                  progress_review.get("missing_change") or "请调整本章策略",
+                    "review_stage": "final_progress_review",
+                })
+        except Exception as exc:
+            if audit:
+                audit.write("final_progress_review_incomplete",
+                            error_type=type(exc).__name__, error=str(exc))
     if audit:
         audit.write("final_plan_selected", source=final_source,
                     validation_status=validation_status,
@@ -1508,15 +1679,19 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     if not title or len(beats) != num_beats:
         raise ValueError("章节规划缺少回目或分幕数量不符。")
     return {"chapter_title": title, "beats": beats,
+            "chapter_strategy": chapter_strategy,
+            "progress_review": progress_review,
             "planning_review": {"status": validation_status, "source": final_source,
-                                "editorial_notes": all_editorial_notes}}
+                                "editorial_notes": all_editorial_notes,
+                                "progress_summary": progress_review.get("summary", "")}}
 
 
 @observe('planning.revise')
 def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                         issues: str, previous_context: str = "",
                         wiki_history: str = "",
-                        progress: Callable[[str], None] | None = None, audit=None) -> dict:
+                        progress: Callable[[str], None] | None = None, audit=None,
+                        revision_scope: str = "local", project_dir: str | None = None) -> dict:
     """按用户指出的问题定向修订现有规划，不直接覆盖已保存计划。"""
     settings = {**settings, '_planning_mode':'revision'}
     current_beats = settings.get("beats") or []
@@ -1525,6 +1700,16 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     issues = str(issues or "").strip()
     if not issues:
         raise ValueError("请先填写需要修改的问题点。")
+    if revision_scope in {"structural", "regenerate"}:
+        rebuilt_settings = {**settings, "_planning_request": issues,
+                            "_planning_mode": "rebuild"}
+        if progress:
+            progress("正在放弃旧分幕结构，从长期故事状态重新确定本章方向")
+        return suggest_chapter_plan(
+            rebuilt_settings, llm, num_beats, previous_context, wiki_history,
+            progress=progress, audit=audit, project_dir=project_dir)
+    if revision_scope != "local":
+        raise ValueError("分幕修订范围无效")
     current = {
         "title": str(settings.get("chapter_title") or "").strip(),
         "beats": current_beats,
@@ -1640,7 +1825,10 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                     if audit:
                         audit.write('plan_shape_choice', requested_beat_count=num_beats,
                                     actual_beat_count=actual_count, chapter_title=title)
-                    return {'chapter_title': title, 'beats': beats, 'planning_review': review,
+                    return {'chapter_title': title, 'beats': beats,
+                            'chapter_strategy': settings.get('chapter_strategy') or {},
+                            'progress_review': settings.get('progress_review') or {},
+                            'planning_review': review,
                             'log_path': str(getattr(audit, 'path', '')) if audit else ''}
             parse_error = _chapter_plan_issues(data, num_beats, previous_context)
             if not parse_error:
@@ -1676,6 +1864,26 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                       'unresolved':[{'scope':'补修','problem':'；'.join(parse_error or []),'suggestion':'重新修订'}]}
     review = {**(acceptance or {}),'source':'user_revision','requirements':issues[:5000],
               'generation_attempts':attempt+1,'editorial_notes':[]}
+    chapter_strategy = settings.get('chapter_strategy') or {}
+    progress_review = settings.get('progress_review') or {}
+    if chapter_strategy and project_dir:
+        try:
+            from core.story_state import load_story_state
+            progress_review = _review_story_progress(
+                llm, {'title': candidate['chapter_title'], 'beats': candidate['beats']},
+                chapter_strategy, load_story_state(project_dir), audit=audit)
+            if not progress_review.get('progressed'):
+                review['status'] = 'needs_review'
+                review.setdefault('unresolved', []).append({
+                    'scope': '跨章故事推进',
+                    'problem': progress_review.get('summary') or '修订后仍与近期章节功能重复',
+                    'suggestion': progress_review.get('strategy_revision') or
+                                  progress_review.get('missing_change') or '改用整章重构',
+                })
+        except Exception as exc:
+            if audit:
+                audit.write('revision_progress_review_incomplete',
+                            error_type=type(exc).__name__, error=str(exc))
     if progress:
         progress('分幕修订要求验收通过；候选已生成，保存后生效' if review.get('status')=='passed'
                  else '分幕候选已生成，但要求验收未通过或未完成，请核对后再保存')
@@ -1683,7 +1891,8 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         audit.write('planning_input_layers', **planning_inputs({**settings, '_planning_request':issues}))
         audit.write('user_plan_revision_result',planning_review=review,
                     chapter_title=candidate['chapter_title'])
-    return {**candidate,'planning_review':review,
+    return {**candidate, 'chapter_strategy': chapter_strategy,
+            'progress_review': progress_review, 'planning_review':review,
             'log_path':str(getattr(audit,'path','')) if audit else ''}
 
 

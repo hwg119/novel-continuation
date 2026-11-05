@@ -96,11 +96,21 @@ def run_trial(config,context,text,guide,backend,emit,running,command=None):
                     elif item['name']=='propose':
                         if decision is not None: raise ValueError('本轮已有操作提案，不重复提交')
                         tool=args.get('tool'); number=args.get('chapter')
-                        if tool not in {'plan','plan_revision','generate','consistency','revise','illustration','view','navigate'}:
-                            raise ValueError('操作名无效；可选 plan/plan_revision/generate/consistency/revise/illustration/view/navigate。修改已有分幕使用 plan_revision')
+                        if tool not in {'plan','plan_revision','generate','consistency','revise','illustration','blueprint','view','navigate'}:
+                            raise ValueError('操作名无效；可选 plan/plan_revision/generate/consistency/revise/illustration/blueprint/view/navigate。修改已有分幕使用 plan_revision')
                         if type(number) is not int or number<1: raise ValueError('章号无效')
                         if tool=='plan' and args.get('target_artifact_id'):
                             raise ValueError('plan 从零构建不使用旧稿；如修改选定的分幕请用 plan_revision')
+                        scope = args.get('revision_scope') or 'local'
+                        if scope not in {'local','structural','regenerate'}:
+                            raise ValueError('分幕修订范围无效')
+                        if tool != 'plan_revision':
+                            args={**args,'revision_scope':'local'}
+                        blueprint_mode = args.get('blueprint_mode') or 'create'
+                        if tool == 'blueprint' and blueprint_mode not in {'create','adjust','regenerate'}:
+                            raise ValueError('蓝图模式无效；请选择 create、adjust 或 regenerate')
+                        if tool != 'blueprint':
+                            args={**args,'blueprint_mode':None}
                         if tool in ('plan_revision','revise'):
                             expected={'plan_revision':'plan','revise':'text'}[tool]
                             selected=backend.resolve(number,args.get('target_artifact_id'),expected)

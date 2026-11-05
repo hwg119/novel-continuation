@@ -105,14 +105,18 @@ onUnmounted(() => { if (timer) clearInterval(timer); emit('layout', { visible: f
 </script>
 
 <template><aside v-if="job" class="task-drawer" :class="{ expanded }" aria-label="任务实时日志">
-  <div class="task-drawer-bar"><span class="terminal-mark" aria-hidden="true">&gt;_</span>
+  <div v-if="!expanded" class="task-drawer-rail">
+    <button type="button" class="task-rail-open" aria-label="展开任务控制台" @click="expanded = true"><span aria-hidden="true">&gt;_</span><i :class="job.status"></i><strong>任务控制台</strong><small>{{ job.events.length }}</small></button>
+    <button type="button" class="task-rail-close" aria-label="关闭任务控制台" @click="close">×</button>
+  </div>
+  <template v-else><div class="task-drawer-bar"><span class="terminal-mark" aria-hidden="true">&gt;_</span>
     <span class="terminal-title">任务控制台</span><span class="task-state" :class="job.status">{{ job.status === 'running' ? job.cancel_requested ? '正在取消' : '运行中' : job.status === 'completed' ? '已完成' : job.status === 'failed' ? '失败' : job.status === 'cancelled' ? '已取消' : '已中断' }}</span>
     <strong>{{ stage(job.message) }}</strong><span class="task-count">{{ job.events.length }} 行</span>
     <span v-if="job.elapsed_seconds != null" class="task-count">已用 {{ job.elapsed_seconds }} 秒</span>
     <button v-if="job.can_cancel" type="button" class="task-icon" :disabled="cancelling || job.cancel_requested" @click="cancelTask">{{ job.cancel_requested ? '等待安全停止' : '取消任务' }}</button>
-    <button type="button" class="task-icon" :aria-label="expanded ? '收起日志' : '展开日志'" :aria-expanded="expanded" @click="expanded = !expanded">{{ expanded ? '收起' : '展开' }} <span aria-hidden="true">{{ expanded ? '⌄' : '⌃' }}</span></button>
+    <button type="button" class="task-icon" aria-label="收起任务控制台" aria-expanded="true" @click="expanded = false">收起 <span aria-hidden="true">›</span></button>
     <button type="button" class="task-icon task-close" aria-label="关闭任务抽屉" @click="close">×</button></div>
-  <div v-if="expanded" ref="logBox" class="task-drawer-log" role="log" aria-live="polite" aria-relevant="additions">
+  <div ref="logBox" class="task-drawer-log" role="log" aria-live="polite" aria-relevant="additions">
     <div class="terminal-session"><span>SESSION</span><code>{{ job.id }}</code><span class="terminal-session-kind">{{ job.kind }}</span></div>
     <p v-if="error" class="task-error"><span aria-hidden="true">!</span> {{ error }}</p>
     <div v-for="(event, index) in job.events" :key="index" class="task-event" :class="eventLevel(event)">
@@ -121,7 +125,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); emit('layout', { visible: f
       <div class="task-event-body"><strong>{{ stage(event.message) }}</strong><small v-if="Object.keys(event.data || {}).length">{{ details(event.data) }}</small></div></div>
     <p v-if="!job.events.length" class="task-waiting"><span aria-hidden="true">›</span> 任务已开始，等待第一条进度日志<span class="terminal-cursor" aria-hidden="true">▌</span></p>
     <div class="terminal-footer"><span>{{ job.status === 'running' ? '● 实时更新中' : '● 本次任务已结束' }}</span><button type="button" class="task-view" @click="emit('view'); expanded = false">查看完整运行记录 ↗</button></div>
-  </div>
+  </div></template>
 </aside>
 <button v-else-if="closedJob" type="button" class="task-reopen" aria-label="重新打开任务控制台" @click="reopen"><span aria-hidden="true">&gt;_</span> 打开控制台</button>
 </template>

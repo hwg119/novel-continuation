@@ -19,7 +19,10 @@ def array_call(model, prompt, audit, stage, temperature=0, num_predict=3500,
     audit.write("patch_response", stage=stage, raw_response=raw)
     match = re.search(r"\[[\s\S]*\]", raw or "")
     if not match:
-        raise ValueError("局部修订未返回数组")
+        text = (raw or "").strip()
+        if text.startswith("[") and not text.endswith("]"):
+            raise ValueError("局部修订输出在 JSON 数组结束前被截断；本次改动范围过大，请改用整章修订")
+        raise ValueError("局部修订未返回 JSON 数组")
     try:
         result = json.loads(match.group())
     except json.JSONDecodeError:

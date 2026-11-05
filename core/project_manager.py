@@ -211,13 +211,19 @@ def settings_for_chapter(settings: dict, chapter_number: int) -> dict:
     plans = settings.get("chapter_plans") or {}
     plan = plans.get(str(chapter_number)) if isinstance(plans, dict) else None
     if isinstance(plan, dict):
-        for key in ("chapter_title", "chapter_brief", "chapter_requirements", "beats"):
-            result[key] = plan.get(key, "" if key != "beats" else [])
+        for key in ("chapter_title", "chapter_brief", "chapter_requirements", "beats",
+                    "chapter_strategy", "progress_review", "planning_review"):
+            default = [] if key == "beats" else {} if key in {
+                "chapter_strategy", "progress_review", "planning_review"} else ""
+            result[key] = plan.get(key, default)
     elif int(settings.get("chapter_number") or 0) != int(chapter_number):
         result["chapter_title"] = ""
         result["chapter_brief"] = ""
         result["chapter_requirements"] = ""
         result["beats"] = []
+        result["chapter_strategy"] = {}
+        result["progress_review"] = {}
+        result["planning_review"] = {}
     return result
 
 

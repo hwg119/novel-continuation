@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 RPC_LOCK=threading.Lock()
 HARNESS_REGISTERED=False
+MODEL_CALL_BUDGET=8
 
 
 def model_request_options(cfg):
@@ -34,6 +35,14 @@ def unsupported_thinking_parameter(exc):
         'unknown','unrecognized','unsupported','not supported','invalid parameter',
         'extra fields','extra_forbidden','unexpected keyword'))
     return parameter and unsupported
+
+
+def transient_connection_error(exc):
+    """Retry transport failures, never provider validation or tool errors."""
+    message=str(exc or '').lower()
+    return any(marker in message for marker in (
+        'connection error','connection reset','connection aborted',
+        'remote protocol error','server disconnected','timed out','timeout'))
 
 
 def friendly_model_error(exc):
@@ -107,13 +116,17 @@ def build_agent(model, system_prompt, call, callback=None):
         return call('read',arguments)
 
     @tool
-    def propose_action(tool_name:Literal['plan','plan_revision','generate','consistency','revise','illustration','view','navigate'], chapter:int, requirements:str='', target_artifact_id:str|None=None,
+    def propose_action(tool_name:Literal['plan','plan_revision','generate','consistency','revise','illustration','blueprint','view','navigate'], chapter:int, requirements:str='', target_artifact_id:str|None=None,
                        selection_reason:str='', source_request_turn:str|None=None,
+                       revision_scope:Literal['local','structural','regenerate']='local',
+                       blueprint_mode:Literal['create','adjust','regenerate']|None=None,
                        navigation:list[str]|None=None) -> dict:
-        """提出操作而非直接执行。plan=从零构建；plan_revision=修改已有分幕；generate=续写；consistency=审校保存正文；revise=修改正文；illustration=生成插图；view=查看正文；navigate=页面导航。修改已有分幕选 plan_revision 并给 plan 对象 ID；修改正文选 revise 并给 text 对象 ID。用户明确要求执行才调用，讨论不要调用。"""
+        """提出操作而非直接执行。plan=从零构建；plan_revision=修改已有分幕，其中 revision_scope=local 是局部修补，structural 是保留正文事实但放弃旧幕结构，regenerate 是完全重新规划；generate=续写；consistency=审校保存正文；revise=修改正文；illustration=生成插图；blueprint=故事蓝图，必须指定 blueprint_mode：create 建立首版、adjust 增量调整、regenerate 保留正文事实与锁定项但重新设计其余结构；view=查看正文；navigate=页面导航。修改已有分幕选 plan_revision 并给 plan 对象 ID；修改正文选 revise 并给 text 对象 ID。用户明确要求执行才调用，讨论不要调用。"""
         return call('propose',{'tool':tool_name,'chapter':chapter,'requirements':requirements,
             'target_artifact_id':target_artifact_id,'artifact_selection_reason':selection_reason,
-            'source_request_turn':source_request_turn,'navigation':navigation or []})
+            'source_request_turn':source_request_turn,'revision_scope':revision_scope,
+            'blueprint_mode':blueprint_mode,
+            'navigation':navigation or []})
 
     return create_deep_agent(model=model,tools=[load_skill,read_conversation_turn,list_artifacts,read_artifact,read_evidence,propose_action],
         system_prompt=system_prompt + '\n你是对话创作助手。用工具按需了解对象和证据，自主决定下一步。'
@@ -123,6 +136,8 @@ def build_agent(model, system_prompt, call, callback=None):
         '旧助手结论只是待核对意见，不是证据；重新评估既不要求赞同旧结论，也不要求找出新问题。'
         '结合完整对话判断承接关系和实际目标，requirements 必须是自包含、具体的业务操作要求，'
         '包含用户确认采用的前文建议与补充限制。用户的确认、评价和版本选择不是创作内容指令；'
+        '修改已有分幕时判断范围：具体某幕、措辞、时间或局部因果用 local；用户认为节奏、故事方向、长期推进或整章结构有问题并要求重写时用 structural；明确要求完全另起方案时用 regenerate。'
+        '蓝图操作必须区分：无现有蓝图时用 create；沿用现有结构并局部修改用 adjust；只保留正文事实和锁定项、重新设计其余结构用 regenerate。已有蓝图时，用户仅说“生成/建立蓝图”而没有说明沿用还是重做，必须先自然语言询问，不能擅自提交操作。'
         '上下文不足以确定目标时才追问。每次只提出一个操作；提出成功后简短说明已生成操作卡片、等待用户执行。'
         '只要答复表示“现在提交、开始修改、请稍候”等即将执行的含义，就必须在同一轮调用 propose_action；'
         '没有调用工具时只能说明建议或缺少的信息，严禁用将来时伪装成正在后台执行。不要输出路由 JSON。'
@@ -155,18 +170,25 @@ def run(request, model=None, call=None):
         model=configured_model(extra)
     class Logs(BaseCallbackHandler):
         calls=0
+        responses=0
         def on_chat_model_start(self,serialized,messages,**kwargs):
             self.calls+=1
-            if self.calls>6: raise RuntimeError('Deep Agents 模型调用预算已达上限')
+            # 一个工具回合至少需要“决定调用 + 接收结果 + 给出答复”三次模型
+            # 调用。旧上限 6 会在最后一次工具调用后直接切断，无法收束回复。
+            if self.calls>MODEL_CALL_BUDGET:
+                raise RuntimeError('Deep Agents 模型调用预算已达上限')
             send({'type':'progress','text':'Deep Agents 正在判断下一步',
                   'details':{'event':'model_start','call':self.calls,
                     'messages':[[{'type':m.type,'content':m.content} for m in batch] for batch in messages]}})
         def on_llm_end(self,response,**kwargs):
+            self.responses+=1
             send({'type':'progress','text':'Deep Agents 模型返回',
                   'details':{'event':'model_response','call':self.calls,'output':response.dict()}})
     logger=Logs()
     logger.raise_error=True
-    agent=build_agent(model,request['system_prompt'],call or rpc)
+    budget_guidance=(f'本轮最多允许 {MODEL_CALL_BUDGET} 次模型调用。查阅资料时优先最小范围证据；'
+                     '第 6 次调用后不得再发起新的查阅或技能加载，应基于已有资料调用操作或给出正式答复。')
+    agent=build_agent(model,request['system_prompt']+'\n'+budget_guidance,call or rpc)
     invocation={'recursion_limit':16,'callbacks':[logger]}
     try:
         result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
@@ -175,7 +197,19 @@ def run(request, model=None, call=None):
         if managed_model and extra and unsupported_thinking_parameter(exc):
             send({'type':'progress','text':'当前接口不支持思考控制参数，已采用接口默认模式重试',
                   'details':{'event':'thinking_control_fallback','parameters':list(extra)}})
-            agent=build_agent(configured_model({}),request['system_prompt'],call or rpc)
+            agent=build_agent(configured_model({}),request['system_prompt']+'\n'+budget_guidance,call or rpc)
+            try:
+                result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
+                    '\n【本次用户消息】\n'+request['text']}]},config=invocation)
+            except Exception as retry_exc:
+                raise ValueError(friendly_model_error(retry_exc)) from retry_exc
+        elif managed_model and logger.responses == 0 and transient_connection_error(exc):
+            # Nothing has been returned and no tool can have run yet, so replaying
+            # the first turn is safe. Never replay a later turn after tool effects.
+            send({'type':'progress','text':'模型连接中断，正在重试首次请求',
+                  'details':{'event':'connection_retry','attempt':2}})
+            agent=build_agent(configured_model(extra),request['system_prompt']+'\n'+budget_guidance,
+                              call or rpc)
             try:
                 result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
                     '\n【本次用户消息】\n'+request['text']}]},config=invocation)

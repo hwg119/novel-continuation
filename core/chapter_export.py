@@ -352,6 +352,20 @@ def export_learning_docx(title: str, edition: dict, output_path: str,
         inline_sources = []
         for segment in block.get("segments", []):
             if segment.get("translated"):
+                replacement = segment.get("word_replacement")
+                if edition.get("display_mode") == "words" and isinstance(replacement, dict):
+                    paragraph.add_run(str(replacement.get("before") or ""))
+                    english = paragraph.add_run(str(replacement.get("word") or ""))
+                    english.font.name = "Aptos"
+                    english.font.color.rgb = RGBColor(25, 63, 78)
+                    english.font.bold = True
+                    paragraph.add_run(str(replacement.get("after") or ""))
+                    for note in segment.get("annotations") or []:
+                        key = str(note.get("word") or "").strip().lower()
+                        if key and key not in vocabulary:
+                            vocabulary[key] = {"word": note.get("word"),
+                                               "meaning": note.get("meaning")}
+                    continue
                 number = len(references) + 1
                 translation = (segment.get("translation") if mode == "exercise"
                                else segment.get("text")) or segment.get("source", "")

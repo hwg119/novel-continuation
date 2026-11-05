@@ -13,6 +13,8 @@ SKILL_MODES = {
     'chapter-revision': {'local': '局部正文修订', 'whole': '全文修订', 'acceptance': '正文修订验收'},
     'prose-polish': {'': '改善表达与行文风格'},
     'history-research': {'': '按需查证历史正文与上下文'},
+    'story-direction': {'': '判断长期故事阶段、章节实质变化与跨章功能重复'},
+    'story-blueprint': {'': '建立或调整全书阶段、故事线、里程碑与章节路线'},
 }
 
 

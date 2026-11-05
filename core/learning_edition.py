@@ -8,10 +8,10 @@ import re
 from pathlib import Path
 
 
-LEARNING_VERSION = 1
+LEARNING_VERSION = 3
 LOADS = {
     'light': {'label': '轻量', 'coverage': .10, 'words': 5},
-    'standard': {'label': '标准', 'coverage': .20, 'words': 8},
+    'standard': {'label': '中量', 'coverage': .20, 'words': 8},
     'challenge': {'label': '挑战', 'coverage': .30, 'words': 12},
 }
 LEVELS = {
@@ -25,6 +25,7 @@ LEVELS = {
 SENTENCE_RE = re.compile(r".*?(?:[。！？!?…]+[”’』」]?|$)", re.DOTALL)
 ENGLISH_RE = re.compile(r"[A-Za-z]")
 CHINESE_RE = re.compile(r"[\u3400-\u9fff]")
+SINGLE_ENGLISH_WORD_RE = re.compile(r"^[A-Za-z]+(?:'[A-Za-z]+)?$")
 
 
 def _digest(text: str) -> str:
@@ -37,6 +38,10 @@ def _path(project_dir: str, number: int, level: str, load: str = 'light') -> Pat
     return directory / f"chapter_{int(number)}_{level}_{load}.json"
 
 
+def _uses_word_mode(level: str, load: str) -> bool:
+    return level == "primary" and load in {"light", "standard"}
+
+
 def _plain_length(text: str) -> int:
     return len(re.sub(r"\s+", "", text))
 
@@ -47,7 +52,10 @@ def _split_body(text: str) -> list[dict]:
     source = body if separator else text
     blocks = []
     segment_id = 0
-    for paragraph_index, paragraph in enumerate(re.split(r"\n\s*\n", source)):
+    # Chapter files use one non-empty line per prose paragraph.  Splitting only
+    # on blank lines collapses the whole chapter into one group and leaves the
+    # "one selection per paragraph" policy with a single English item.
+    for paragraph_index, paragraph in enumerate(re.split(r"\r?\n+", source)):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
@@ -204,6 +212,47 @@ def _translate_batch(llm, rows: list[dict], level: str) -> dict[str, dict]:
     return result
 
 
+def _word_batch(llm, rows: list[dict]) -> dict[str, dict]:
+    """Choose one concrete A1-A2 word per sentence for primary light/medium mode."""
+    source = json.dumps([{"id": row["id"], "source": row["source"]} for row in rows],
+                        ensure_ascii=False)
+    prompt = f"""从每个中文小说句子中选择一个适合小学高年级学习的具体词，替换成一个英文单词。
+
+规则：
+1. 每项只选一个中文词，source_word 必须逐字出现在原句中，长度通常为1—4个汉字。
+2. word 必须是单个 CEFR A1-A2 高频英文单词，不能包含空格，不能输出短语或完整句子。
+3. 优先选择动作、物品、颜色、情绪等容易结合上下文理解的词；不要选择人名、地名、专有名词、助词、“行”“好”等含义依赖语气的单字。
+4. 英文必须准确对应原句中的 source_word，不得改变原句事实。
+5. 同一批次尽量不要重复相同英文单词。
+6. 只输出 JSON 数组，保持输入 id，不要解释或输出 Markdown。
+
+输出格式：
+[{{"id":"s1","source_word":"门","word":"door"}}]
+
+待处理句子：
+{source}"""
+    raw = llm.complete(prompt, system="你是小学英语词汇编辑，只输出 JSON 数组。",
+                       temperature=0.15, num_predict=2600, disable_thinking=True)
+    data = _extract_array(raw)
+    expected = {row["id"]: row["source"] for row in rows}
+    result = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "")
+        source_word = str(item.get("source_word") or "").strip()
+        word = str(item.get("word") or "").strip()
+        if (item_id not in expected or source_word not in expected[item_id]
+                or not CHINESE_RE.search(source_word)
+                or not SINGLE_ENGLISH_WORD_RE.fullmatch(word)):
+            continue
+        result[item_id] = {"word": word, "source_word": source_word}
+    missing = set(expected) - result.keys()
+    if missing:
+        raise ValueError(f"模型漏选了 {len(missing)} 个单词")
+    return result
+
+
 def read_learning_edition(project_dir: str, number: int, level: str,
                           chapter_text: str, load: str = 'light') -> dict:
     if level not in LEVELS:
@@ -218,7 +267,9 @@ def read_learning_edition(project_dir: str, number: int, level: str,
         data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return empty
-    valid = (data.get("version") == LEARNING_VERSION and
+    version_valid = (data.get("version") == LEARNING_VERSION or
+                     (data.get("version") in {1, 2} and not _uses_word_mode(level, load)))
+    valid = (version_valid and
              data.get("source_hash") == _digest(chapter_text))
     return {**data, "exists": True, "valid": valid,
             "level_label": LEVELS[level]["label"]}
@@ -230,7 +281,12 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
         raise ValueError("英语学习级别无效")
     if load not in LOADS: raise ValueError('学习负担无效')
     blocks = _split_body(chapter_text)
+    word_mode = _uses_word_mode(level, load)
     selected = _select_segments(blocks, level, load)
+    if word_mode:
+        # Ask for a small surplus so repeated/invalid choices can be skipped,
+        # without translating dozens of sentences to keep only 5–8 words.
+        selected = selected[:LOADS[load]['words'] * 2]
     if not selected:
         raise ValueError("本章没有适合生成英语学习版的中文句子")
     translated = {}
@@ -244,7 +300,8 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
                          {"done": index - 1, "total": len(batches),
                           "attempt": attempt + 1})
             try:
-                translated.update(_translate_batch(llm, batch, level))
+                translated.update(_word_batch(llm, batch) if word_mode
+                                  else _translate_batch(llm, batch, level))
                 last_error = None
                 break
             except ValueError as exc:
@@ -258,6 +315,25 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
         for segment in block["segments"]:
             item = translated.get(segment["id"])
             if not item:
+                continue
+            if word_mode:
+                word = item["word"]
+                source_word = item["source_word"]
+                key = word.casefold()
+                if key in introduced or len(introduced) >= LOADS[load]['words']:
+                    continue
+                introduced.add(key)
+                segment["translated"] = True
+                segment["translation"] = word
+                segment["annotations"] = [{"word": word, "meaning": source_word}]
+                before, after = segment["source"].split(source_word, 1)
+                segment["word_replacement"] = {
+                    "before": before, "word": word,
+                    "meaning": source_word, "after": after,
+                }
+                segment["text"] = before + word + after
+                translated_chars += _plain_length(source_word)
+                annotation_count += 1
                 continue
             new_words = {note['word'].casefold() for note in item['annotations']} - introduced
             if len(introduced | new_words) > LOADS[load]['words']:
@@ -278,6 +354,7 @@ def generate_learning_edition(project_dir: str, number: int, chapter_text: str,
         "load": load,
         "load_label": LOADS[load]['label'],
         "level_label": LEVELS[level]["label"],
+        "display_mode": "words" if word_mode else "sentences",
         "source_hash": _digest(chapter_text),
         "blocks": blocks,
         "stats": {"segments": sum(len(block["segments"]) for block in blocks),

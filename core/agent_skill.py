@@ -7,7 +7,8 @@ from pathlib import Path
 def load_agent_skill(name, reference=None):
     """按用途加载项目 Skill；修订只加载当前模式的参考，不附带查证工具。"""
     if name not in {"history-research", "consistency-audit", "story-audit", "chapter-revision",
-                    "chapter-planning", "chapter-writing", "prose-polish", "project-guide"}:
+                    "chapter-planning", "chapter-writing", "prose-polish", "project-guide",
+                    "story-direction", "story-blueprint"}:
         raise ValueError("不支持的项目 Skill")
     skill_root = Path(__file__).resolve().parents[1] / "agent_skills"
     root = skill_root / name

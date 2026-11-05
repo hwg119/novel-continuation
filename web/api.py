@@ -222,6 +222,10 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                     os.unlink(temp_path)
             from core.chapter_revision import archive_outdated_summary
             archive_outdated_summary(project, number)
+            from core.story_state import invalidate_story_state
+            invalidate_story_state(project, number)
+            from core.story_blueprint import invalidate_story_blueprint
+            invalidate_story_blueprint(project, number)
         vector_job = None
         vector_status = "not_initialized"
         try:
