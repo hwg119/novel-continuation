@@ -311,7 +311,7 @@ onMounted(() => { void load() })
       <p v-for="(note, index) in planningReview.editorial_notes" :key="index" class="muted-note">{{ note.scope }}：{{ note.problem }} {{ note.suggestion }}</p>
     </details>
     <div class="inline-fields"><label>章号<input v-model.number="chapter" type="number" min="1" @change="planFor(chapter); emit('chapter', chapter)"></label>
-          <label>默认规划幕数<input v-model.number="settings.beats_per_chapter" type="number" min="1" max="12"></label></div>
+          <label>单章分幕上限<input v-model.number="settings.beats_per_chapter" type="number" min="1" max="12" title="模型根据自然场景决定实际幕数，只限制最多输出多少幕"></label></div>
     <label>本章回目<input v-model="settings.chapter_title"></label>
     <label>本章目标<textarea v-model="settings.chapter_brief" rows="4"></textarea></label>
     <label>本章专属要求<textarea v-model="settings.chapter_requirements" rows="4"></textarea></label>

@@ -90,5 +90,5 @@ def story_direction_context(project_dir: str, before_chapter: int) -> dict[str, 
         "stored_state_is_current": int(state.get("updated_through_chapter") or 0) >= latest,
         "latest_saved_chapter": latest,
         "recent_summaries": recent_summary_context(project_dir, before_chapter),
-        "story_blueprint": blueprint_for_planning(project_dir),
+        "story_blueprint": blueprint_for_planning(project_dir, before_chapter),
     }

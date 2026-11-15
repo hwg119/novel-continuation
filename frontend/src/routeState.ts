@@ -1,5 +1,5 @@
 export type View = 'chat' | 'home' | 'write' | 'revision' | 'settings' | 'projects' |
-  'quality' | 'blueprint' | 'wiki' | 'relationships' | 'runs' | 'config' | 'developer'
+  'quality' | 'blueprint' | 'analysis' | 'wiki' | 'relationships' | 'runs' | 'config' | 'developer'
 export type RouteState = { view: View; projectId: string; chapterNumber: number | null }
 
 function chapter(value: string | undefined): number | null {
@@ -18,7 +18,7 @@ export function parseRoute(pathname: string): RouteState | null {
   const base = { projectId, chapterNumber: null }
   if (parts.length === 3) {
     const pages: Record<string, View> = { chat: 'chat', home: 'home', novel: 'write',
-      settings: 'settings', blueprint: 'blueprint', manage: 'projects', quality: 'quality', wiki: 'wiki', runs: 'runs', developer:'developer' }
+      settings: 'settings', blueprint: 'blueprint', analysis: 'analysis', manage: 'projects', quality: 'quality', wiki: 'wiki', runs: 'runs', developer:'developer' }
     const view = pages[parts[2]!]
     return view ? { ...base, view } : null
   }
@@ -50,7 +50,7 @@ export function routePath(view: View, projectId: string, chapterNumber: number |
   if (view === 'settings') return chapterNumber ? `${base}/settings/${chapterNumber}` : `${base}/settings`
   if (view === 'relationships') return `${base}/wiki/relationships`
   const pages: Record<Exclude<View, 'write' | 'revision' | 'quality' | 'settings' | 'config' | 'relationships'>, string> = {
-    chat: 'chat', home: 'home', blueprint: 'blueprint', projects: 'manage', wiki: 'wiki', runs: 'runs', developer:'developer',
+    chat: 'chat', home: 'home', blueprint: 'blueprint', analysis: 'analysis', projects: 'manage', wiki: 'wiki', runs: 'runs', developer:'developer',
   }
   return `${base}/${pages[view]}`
 }

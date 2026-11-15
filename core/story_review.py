@@ -41,7 +41,7 @@ def assemble_story_result(data, sources, audit=None):
         raise ValueError("故事审校情节增强格式无效")
     instructions, details, notes, accepted_enhancements, skipped = [], [], [], [], []
     issues = []
-    for candidate in data["issues"][:6]:
+    for candidate in data["issues"][:2]:
         if not isinstance(candidate, dict):
             continue
         # 定位只能核验引文，重大影响是否成立仍是模型的判断，不伪称程序证明。
@@ -59,7 +59,7 @@ def assemble_story_result(data, sources, audit=None):
         elif item.get("problem"):
             notes.append(f"待核对：{item['problem']}（{item['evidence_status']}）")
     body = next((row["text"] for row in sources if row["id"] == "T01"), "")
-    for item in enhancements[:3]:
+    for item in enhancements[:2]:
         if not isinstance(item, dict):
             skipped.append({"item": item, "reason": "增强意见格式无效"})
             continue
@@ -85,12 +85,13 @@ def assemble_story_result(data, sources, audit=None):
             if note.strip():
                 notes.append(note.strip())
     summary = str(data.get("decision_summary") or "").strip()
+    report_parts = ["【故事审校】\n" + (summary or "本轮审校已完成。"),
+                    "【主线依据】\n" + ("\n\n".join(details) or "未发现有充分依据的重大主线问题；不代表全文没有细节错误。")]
     output = {
-        "audit_kind": "story", "audit_version": 2,
+        "audit_kind": "story", "audit_version": 4,
         "story_summary": summary,
         "story_details": "\n\n".join(details),
-        "report": "【故事审校】\n" + (summary or "本轮审校已完成。") + "\n\n【主线依据】\n" +
-                  ("\n\n".join(details) or "未发现有充分依据的重大主线问题；不代表全文没有细节错误。"),
+        "report": "\n\n".join(report_parts),
         "revision_requirements": "\n".join(f"{i}. {x}" for i, x in enumerate(instructions, 1)),
         "story_enhancements": accepted_enhancements,
         "audit_notes": list(dict.fromkeys(notes)),

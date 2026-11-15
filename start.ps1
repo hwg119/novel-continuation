@@ -10,6 +10,7 @@ $FrontendRoot = Join-Path $AppRoot "frontend"
 $VenvRoot = Join-Path $AppRoot ".venv"
 $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $Url = "http://127.0.0.1:8765"
+$BgeUrl = "http://127.0.0.1:11435"
 
 function Write-Step([string]$Message) {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
@@ -46,16 +47,91 @@ function Get-Sha256([string]$Path) {
     }
 }
 
-function Test-PortOpen {
+function Test-PortOpen([int]$Port = 8765) {
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
-        $task = $client.ConnectAsync("127.0.0.1", 8765)
+        $task = $client.ConnectAsync("127.0.0.1", $Port)
         return $task.Wait(350) -and $client.Connected
     } catch {
         return $false
     } finally {
         $client.Dispose()
     }
+}
+
+function Get-SelectedEmbeddingFormat {
+    $ConfigPath = Join-Path $AppRoot "config.json"
+    if (-not (Test-Path $ConfigPath)) { return "本地bge" }
+    try {
+        $Config = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $Name = [string]$Config.last_embedding_config_name
+        if (-not $Name) { return "" }
+        $Selected = $Config.embedding_configs.PSObject.Properties[$Name].Value
+        return [string]$Selected.interface_format
+    } catch {
+        Write-Warning "Could not read the selected embedding configuration: $($_.Exception.Message)"
+        return ""
+    }
+}
+
+function Test-BgeHealthy {
+    if (-not (Test-PortOpen 11435)) { return $false }
+    try {
+        $Response = Invoke-RestMethod -Uri "$BgeUrl/health" -Method Get -TimeoutSec 2
+        return $Response.status -eq "ok"
+    } catch {
+        return $false
+    }
+}
+
+function Ensure-BgeService {
+    $Format = (Get-SelectedEmbeddingFormat).Trim().ToLowerInvariant()
+    if ($Format -notin @("本地bge", "localopenai", "本地embedding")) { return }
+    if (Test-BgeHealthy) {
+        Write-Host "BGE embedding service: ready ($BgeUrl)" -ForegroundColor Green
+        return
+    }
+
+    $BgeRoot = Join-Path $AppRoot "tools\embedding"
+    $BgeScript = Join-Path $BgeRoot "embedding_server.py"
+    $CacheRoot = if ($env:BGE_M3_CACHE_DIR) {
+        $env:BGE_M3_CACHE_DIR
+    } else {
+        Join-Path $BgeRoot ".cache\huggingface\models--BAAI--bge-m3\snapshots\main"
+    }
+    $ModelPath = Join-Path $CacheRoot "onnx\model.onnx"
+    if (-not (Test-Path $ModelPath)) {
+        Write-Warning "BGE embedding service was not started because model weights are missing."
+        Write-Host "  One-time setup: $VenvPython `"$(Join-Path $BgeRoot 'dl_bge_m3.py')`"" -ForegroundColor Yellow
+        return
+    }
+
+    & $VenvPython -c "import flask, onnxruntime, transformers" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "BGE embedding service was not started because Python dependencies are missing."
+        Write-Host "  Install once: $VenvPython -m pip install flask onnxruntime transformers sentencepiece" -ForegroundColor Yellow
+        return
+    }
+
+    $LogRoot = Join-Path $AppRoot "workspace\_service_logs"
+    New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+    $Stdout = Join-Path $LogRoot "bge-m3.stdout.log"
+    $Stderr = Join-Path $LogRoot "bge-m3.stderr.log"
+    Write-Step "Starting the local BGE-M3 embedding service"
+    Start-Process -FilePath $VenvPython -ArgumentList @($BgeScript, "--port", "11435") `
+        -WorkingDirectory $BgeRoot -WindowStyle Hidden `
+        -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr | Out-Null
+
+    for ($Attempt = 0; $Attempt -lt 60; $Attempt++) {
+        if (Test-BgeHealthy) {
+            Write-Host "BGE embedding service: ready ($BgeUrl)" -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Warning "BGE embedding service did not become ready within 30 seconds."
+    Write-Host "  Logs: $Stdout" -ForegroundColor Yellow
+    Write-Host "        $Stderr" -ForegroundColor Yellow
 }
 
 function Open-Workbench {
@@ -129,12 +205,14 @@ Write-Host "Frontend dependencies: $(if ($NeedsNpmInstall) {'setup required'} el
 Write-Host "Frontend build: $(if ($NeedsBuild) {'build required'} else {'up to date'})"
 
 if ($Check) {
-    if (Test-PortOpen) { Write-Host "Port 8765: a service is listening" } else { Write-Host "Port 8765: available" }
+    if (Test-PortOpen 8765) { Write-Host "Port 8765: a service is listening" } else { Write-Host "Port 8765: available" }
+    if (Test-BgeHealthy) { Write-Host "BGE embedding service: ready" } else { Write-Host "BGE embedding service: not running" }
     Write-Host "`nEnvironment check complete. Nothing was installed or started." -ForegroundColor Green
     exit 0
 }
 
-if (Test-PortOpen) {
+if (Test-PortOpen 8765) {
+    if (Test-Path $VenvPython) { Ensure-BgeService }
     try {
         $response = Invoke-WebRequest -Uri "$Url/api/projects" -UseBasicParsing -TimeoutSec 2
         if ($response.StatusCode -eq 200) {
@@ -158,6 +236,8 @@ if ($NeedsPythonInstall) {
     if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Python dependency installation failed. Check the network and the error above." }
     Set-Content -Path $RequirementsStamp -Value $RequirementsHash -Encoding ascii
 }
+
+Ensure-BgeService
 
 if ($NeedsNpmInstall) {
     Write-Step "Installing frontend dependencies (the first run may take several minutes)"

@@ -88,6 +88,12 @@ class BlueprintGenerateRequest(BaseModel):
     mode: Literal["create", "adjust", "regenerate"] = "create"
 
 
+class NarrativeAnalysisRequest(BaseModel):
+    start: int = Field(ge=1)
+    end: int = Field(ge=1)
+    model_name: str = ""
+
+
 class BlueprintSaveRequest(BaseModel):
     blueprint: dict = Field(default_factory=dict)
 
@@ -536,6 +542,28 @@ def register_features(app: FastAPI, workspace_root: str,
         from core.story_blueprint import blueprint_graph_data
         return blueprint_graph_data(project_path(project_id))
 
+    @app.get("/api/projects/{project_id}/narrative-analysis")
+    def get_narrative_analysis(project_id: str, start: int, end: int):
+        from core.narrative_analysis import load_narrative_analysis
+        if start < 1 or end < start:
+            raise HTTPException(400, "章节范围无效")
+        result = load_narrative_analysis(project_path(project_id), start, end)
+        return {"exists": result is not None, "analysis": result}
+
+    @app.post("/api/projects/{project_id}/narrative-analysis",
+              dependencies=[Depends(_write_required)])
+    def extract_narrative_analysis(project_id: str, payload: NarrativeAnalysisRequest):
+        from core.continuation import ContinuationLLM
+        from core.narrative_analysis import generate_narrative_analysis
+        path = project_path(project_id)
+        model_cfg = llm(payload.model_name)
+
+        def work(update):
+            return {"analysis": generate_narrative_analysis(
+                path, payload.start, payload.end, ContinuationLLM(model_cfg), progress=update)}
+
+        return jobs.start(path, "narrative_analysis", work)
+
     @app.post("/api/projects/{project_id}/story-blueprint/directions",
               dependencies=[Depends(_write_required)])
     def generate_story_blueprint_directions(project_id: str,
@@ -628,7 +656,7 @@ def register_features(app: FastAPI, workspace_root: str,
                     path, job_id, ContinuationLLM(model_cfg), lambda message: update(message), audit,
                     initial={"settings": settings, "chapter_number": payload.number,
                              "model_name": payload.model_name,
-                             "num_beats": int(settings.get("beats_per_chapter") or 6),
+                             "num_beats": int(settings.get("beats_per_chapter") or 10),
                              "previous_context": previous, "wiki_history": wiki,
                              "fingerprint": planning_fingerprint(path, payload.number)})
                 audit.write("run_completed", result=result)
@@ -720,7 +748,15 @@ def register_features(app: FastAPI, workspace_root: str,
         target_count = payload.preview.get('_target_beat_count')
         if target_count is not None and (type(target_count) is not int or not 1 <= target_count <= 12):
             raise HTTPException(400, "目标幕数必须为 1～12")
-        num_beats = target_count or len(current_beats) or int(settings.get("beats_per_chapter") or 6)
+        if target_count is not None:
+            num_beats = target_count
+            settings['_fixed_beat_count'] = target_count
+        elif payload.plan_revision_scope in {"structural", "regenerate"}:
+            # A full rebuild starts from the configured ceiling, not the old
+            # candidate's count.  The model is free to return fewer scenes.
+            num_beats = int(settings.get("beats_per_chapter") or 10)
+        else:
+            num_beats = len(current_beats) or int(settings.get("beats_per_chapter") or 10)
         previous = _planning_context(path, project_settings, payload.number)
         wiki = wiki_context(path, previous, before_chapter=payload.number)
         model_cfg = llm(payload.model_name)

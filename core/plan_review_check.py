@@ -35,7 +35,11 @@ def _located_plan_citations(check, sources):
         source = plan_sources.get(citation.get('source_id'))
         quote = str(citation.get('quote') or '').strip()
         if not source or not _same_text_span(quote, source['text']):
-            raise ValueError('创作目标核对所引规划原文无法定位')
+            # Rewrites can invalidate a source id or turn a verbatim quote into
+            # a close paraphrase.  Ignore that citation instead of discarding
+            # the complete acceptance result.  Unmet goals still become
+            # explicit issues below.
+            continue
         located.append({'source_id': source['id'], 'quote': quote, 'label': source['label']})
     return located
 
@@ -61,7 +65,7 @@ def goal_check_issues(response, request, sources):
         # Presence needs positive proof in the candidate. Absence has no text to
         # quote; an unmet check may instead explain the missing effect directly.
         if check['met'] and not located:
-            raise ValueError('已落实的创作目标缺少可定位的规划引文')
+            check['citation_warning'] = '已落实判断缺少可逐字定位的规划引文'
         if not check['met']:
             suggestion = str(check.get('suggestion') or '').strip()
             if not suggestion:

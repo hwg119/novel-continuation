@@ -1053,8 +1053,11 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
     # A six-beat plan with evidence fields regularly exceeds the old 2760-token
     # limit on verbose models. Keep the request within the user's provider limit,
     # while reserving enough room to close the complete JSON object.
-    flexible_min = max(1, num_beats - 1)
-    flexible_max = min(12, num_beats + 1)
+    # In flexible mode num_beats is an upper bound, not a preferred target.
+    # This keeps the model from padding a naturally short chapter to approach
+    # the configured value.
+    flexible_min = 1
+    flexible_max = min(12, num_beats)
     output_budget = min(configured_budget, max(
         4096, (flexible_max if allow_flexible_count else num_beats) * 720))
     for attempt in range(attempts):
@@ -1115,6 +1118,87 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
     raise ValueError(last_error)
 
 
+_STORY_STATE_KEYS = {
+    "updated_through_chapter", "story_phase", "arcs", "recent_chapter_changes",
+}
+_CHAPTER_STRATEGY_KEYS = {
+    "chapter_role", "primary_arc", "secondary_arc", "primary_change",
+    "secondary_change", "surface_story", "scene_texture", "theme_echo",
+    "opening_pressure", "central_choice", "cost", "ending_change",
+    "reader_question_before", "reader_question_after", "avoid_repeating",
+    "hard_constraints", "desired_outcome", "preferences", "examples",
+}
+
+
+def _normalize_story_direction_payload(data: dict) -> tuple[dict, dict | None, dict | None]:
+    """Recover common provider shape drift without inventing creative content."""
+    if not isinstance(data, dict):
+        return data, None, None
+    state = data.get("story_state") or data.get("state")
+    strategy = data.get("strategy") or data.get("chapter_strategy")
+    if not isinstance(state, dict) and any(key in data for key in _STORY_STATE_KEYS):
+        state = {key: data[key] for key in _STORY_STATE_KEYS if key in data}
+    if not isinstance(strategy, dict) and any(key in data for key in _CHAPTER_STRATEGY_KEYS):
+        strategy = {key: data[key] for key in _CHAPTER_STRATEGY_KEYS if key in data}
+    normalized = dict(data)
+    if isinstance(state, dict):
+        normalized["story_state"] = state
+    if isinstance(strategy, dict):
+        normalized["strategy"] = strategy
+    return normalized, state if isinstance(state, dict) else None, strategy if isinstance(strategy, dict) else None
+
+
+def _destination_only(value: str) -> str:
+    """Remove staged execution milestones while retaining chapter-end states."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    process_markers = re.compile(
+        r"(?:第一次|第二次|再次|复看|先.{0,12}再|至少.{0,8}次|中止后|完成后)")
+    state_markers = re.compile(
+        r"(?:仍|尚|未|留下|进入|成为|保持|不能|不得|等待|移交|封存|退出|拥有|失去)")
+    kept = []
+    for clause in re.split(r"(?<=[。；])", text):
+        clause = clause.strip(" ；。")
+        if not clause:
+            continue
+        if process_markers.search(clause):
+            state_parts = [part.strip() for part in re.split(r"[，,]", clause)
+                           if state_markers.search(part)]
+            if not state_parts:
+                continue
+            clause = state_parts[-1]
+            clause = re.sub(r"(?:后续)?谨慎复看(?:安排)?", "后续处理", clause)
+        kept.append(clause)
+    return "；".join(kept[:5]).strip("；")
+
+
+def _compact_chapter_strategy(strategy: dict) -> dict:
+    """Keep the creative contract a boundary instead of a growing checklist."""
+    compact = dict(strategy or {})
+    constraints = list(compact.get("hard_constraints") or [])
+    multi_pattern = re.compile(
+        r"(?:至少.{0,10}(?:两|2)次|(?:两|2)次.{0,16}(?:残影|视认|观察)|"
+        r"第二次.{0,20}(?:观察|残影|视认)|(?:观察|残影|视认).{0,30}第二次)")
+    forbid_pattern = re.compile(r"(?:不|不得|禁止).{0,12}(?:第二次|再次).{0,12}(?:残影|视认|观察)")
+    if (any(multi_pattern.search(str(item)) for item in constraints)
+            and any(forbid_pattern.search(str(item)) for item in constraints)):
+        constraints = [item for item in constraints
+                       if not multi_pattern.search(str(item))
+                       and not forbid_pattern.search(str(item))]
+        constraints.append(
+            "相关异常只形成一次正式共同视认记录；既有的协作、地点、时限、记录与见证边界继续有效，"
+            "分工或环境变化作为同一持续观察过程中的阶段变化处理，不得拆成第二次观察；"
+            "异常保持局部且原因未明。")
+        compact["contract_resolution"] = "已将相互冲突的多次呈现与禁止再次呈现合并为一次持续观察。"
+    compact["hard_constraints"] = constraints[:8]
+    compact["desired_outcome"] = _destination_only(compact.get("desired_outcome") or "")
+    compact["preferences"] = list(compact.get("preferences") or [])[:4]
+    compact["examples"] = list(compact.get("examples") or [])[:3]
+    compact["avoid_repeating"] = list(compact.get("avoid_repeating") or [])[:8]
+    return compact
+
+
 def _request_story_direction(settings: dict, llm: ContinuationLLM,
                              project_dir: str | None, audit=None,
                              feedback: str = "", recent_context: str = "") -> dict:
@@ -1127,6 +1211,11 @@ def _request_story_direction(settings: dict, llm: ContinuationLLM,
                if project_dir and chapter_number else {
                    "stored_state": {}, "latest_saved_chapter": max(0, chapter_number - 1),
                    "recent_summaries": []})
+    if project_dir and chapter_number:
+        from core.narrative_analysis import latest_narrative_guidance
+        analysis_guidance = latest_narrative_guidance(project_dir, chapter_number)
+        if analysis_guidance:
+            context["recent_narrative_analysis"] = analysis_guidance
     guidance = skill_guidance("story-direction", audit=audit, stage="story_direction")
     prompt = f"""{guidance}
 
@@ -1147,15 +1236,33 @@ def _request_story_direction(settings: dict, llm: ContinuationLLM,
 {feedback or '（首次制定策略）'}
 
 输出 JSON：
-{{"story_state":{{"updated_through_chapter":整数,"story_phase":{{"name":"阶段","current_pressure":"当前压力","expected_transition":"下一步变化"}},"arcs":[{{"id":"稳定短标识","name":"故事线","priority":"primary或secondary","current_state":"当前状态","last_material_change_chapter":整数,"recent_methods":["近期反复使用的场景功能"],"open_questions":["读者期待"],"next_pressure":"下一步压力"}}],"recent_chapter_changes":[{{"chapter":整数,"material_changes":["实质变化"],"scene_functions":["场景功能"]}}]}},"strategy":{{"chapter_role":"本章作用","primary_arc":"主线标识","secondary_arc":"支线标识或空","primary_change":"主线必须发生的变化","secondary_change":"支线的人物变化或空","opening_pressure":"开场压力","central_choice":"核心选择","cost":"选择的代价或风险","ending_change":"章末局面变化","reader_question_before":"章前读者问题","reader_question_after":"章后升级的问题","avoid_repeating":["应避免重复的场景功能"]}}}}
+{{"story_state":{{"updated_through_chapter":整数,"story_phase":{{"name":"阶段","current_pressure":"当前压力","expected_transition":"下一步变化"}},"arcs":[{{"id":"稳定短标识","name":"故事线","priority":"primary或secondary","current_state":"当前状态","last_material_change_chapter":整数,"recent_methods":["近期反复使用的场景功能"],"open_questions":["读者期待"],"next_pressure":"下一步压力"}}],"recent_chapter_changes":[{{"chapter":整数,"material_changes":["实质变化"],"scene_functions":["场景功能"]}}]}},"strategy":{{"chapter_role":"本章作用","primary_arc":"主线标识","secondary_arc":"支线标识或空","primary_change":"主线必须发生的变化","secondary_change":"支线的人物变化或空","surface_story":"人物当下真正经历的表层故事","scene_texture":{{"setting":"主要空间","interaction":"主要互动方式","tone":"情绪质感","spectacle":"可感官体验或空"}},"theme_echo":"主题如何只在选择或后果中产生隐约回声，不写主题口号","opening_pressure":"开场压力","central_choice":"核心选择","cost":"选择的代价或风险","ending_change":"章末局面变化","reader_question_before":"章前读者问题","reader_question_after":"章后升级的问题","avoid_repeating":["应避免重复的场景功能"],"hard_constraints":["不可违背的正文事实或明确禁区，最多8条"],"desired_outcome":"本章结束时必须抵达的状态，用一至三句整体描述","preferences":["可采用但不强制逐项覆盖的方向，最多4条"],"examples":["只供启发、不得逐项执行的例子，最多3条"]}}}}
 
-story_state 只根据已保存章节更新；strategy 可以采用用户对未来情节的要求。story_blueprint 中 facts 是正文依据，plan 是未来目标而非已经发生的事件；优先遵守锁定的阶段、故事线、里程碑和章节路线，但不得把规划节点写进历史状态。最近章节变化只保留最近 6 章。只输出完整 JSON。"""
+story_state 只根据已保存章节更新；strategy 可以采用用户对未来情节的要求。先把创作输入整理为 hard_constraints、desired_outcome、preferences、examples：中间执行步骤不得自动升级为硬约束；多个结果不得各自绑定一场戏；示例只能启发，不能逐项覆盖。若原要求存在幕数下限、次数下限，或“至少出现多次”与“不得再次出现”之类互相牵制的执行条件，而用户没有明确把次数本身设为不可更改事实，应将次数与执行方式从 hard_constraints 移出，在 desired_outcome 中合并成整体效果；不得用改名、换地点或换感官制造形式不同、功能重复的事件。上一轮审查反馈只用于改变整章的因果组织，不得逐条转写成新的硬约束、场景或修复任务。story_blueprint 中 facts 是正文依据；planning_scope 只提供本章相关方向，其中 route_authority=binding 是必须遵守的用户锁定设计，advisory 中的创意可调整表层实现。theme_compass 只作为潜台词，不得把主题名词当作本章任务。recent_narrative_analysis 只能作为避免重复的参考。最近章节变化只保留最近 6 章。只输出完整 JSON。"""
     result = None
+    partial_state = None
+    partial_strategy = None
     last_error = "模型未返回故事方向 JSON"
     for attempt in range(2):
-        request = prompt if attempt == 0 else (
-            f"上次故事方向无法解析：{last_error}。请压缩说明并重新输出完整 JSON；"
-            "不要输出分析过程、Markdown 或额外字段说明。\n\n" + prompt)
+        if attempt == 0:
+            request = prompt
+        elif partial_state and not partial_strategy:
+            request = f"""上次已经成功生成 story_state，现只补充第 {chapter_number} 章的 strategy，不要重复 story_state。
+【已生成的故事状态】
+{json.dumps(partial_state, ensure_ascii=False)}
+【本章已有目标】
+{settings.get('chapter_brief', '') or '承接最新正文并形成有效推进'}
+【用户本次要求】
+{current_creation_request(settings) or '（无额外要求）'}
+只输出 JSON：{{"strategy":{{"chapter_role":"本章作用","primary_arc":"主线标识","secondary_arc":"支线标识或空","primary_change":"主线变化","secondary_change":"支线变化或空","surface_story":"人物实际经历的表层故事","scene_texture":{{"setting":"空间","interaction":"互动方式","tone":"情绪质感","spectacle":"感官体验或空"}},"theme_echo":"只在选择和后果中产生的主题回声","opening_pressure":"开场压力","central_choice":"核心选择","cost":"整章关键选择的代价","ending_change":"章末变化","reader_question_before":"章前问题","reader_question_after":"章后问题","avoid_repeating":["避免重复功能"],"hard_constraints":["正文事实和禁区"],"desired_outcome":"章末整体状态","preferences":["非强制方向"],"examples":["仅供启发的例子"]}}}}。不要输出分析、Markdown 或 chapter_outline。"""
+        elif partial_strategy and not partial_state:
+            request = f"""上次已经成功生成 strategy，现只补充截至第 {max(0, chapter_number - 1)} 章的 story_state，不要重复 strategy。
+【长期状态依据】
+{json.dumps(context, ensure_ascii=False)}
+只输出 JSON：{{"story_state":{{"updated_through_chapter":整数,"story_phase":{{}},"arcs":[],"recent_chapter_changes":[]}}}}。只记录已保存正文，不输出分析或 Markdown。"""
+        else:
+            request = (f"上次故事方向无法解析：{last_error}。请压缩说明并重新输出完整 JSON；"
+                       "不要输出分析过程、Markdown、chapter_outline 或额外字段说明。\n\n" + prompt)
         if audit:
             audit.write("story_direction_request", attempt=attempt + 1,
                         prompt_chars=len(request), prompt=request)
@@ -1166,7 +1273,14 @@ story_state 只根据已保存章节更新；strategy 可以采用用户对未�
             audit.write("story_direction_response", attempt=attempt + 1,
                         response_chars=len(raw or ""), raw_response=raw)
         try:
-            result = validate_story_direction(_first_json_object(raw))
+            parsed = _first_json_object(raw)
+            normalized, found_state, found_strategy = _normalize_story_direction_payload(parsed)
+            partial_state = found_state or partial_state
+            partial_strategy = found_strategy or partial_strategy
+            if partial_state and partial_strategy:
+                normalized = {"story_state": partial_state, "strategy": partial_strategy}
+            result = validate_story_direction(normalized)
+            result["strategy"] = _compact_chapter_strategy(result["strategy"])
             break
         except ValueError as exc:
             last_error = str(exc)
@@ -1195,7 +1309,9 @@ def _review_story_progress(llm: ContinuationLLM, plan: dict, strategy: dict,
 【当前候选分幕】
 {json.dumps(plan, ensure_ascii=False)}
 
-忽略人物名、地点、日期和道具名称，比较实际场景功能。判断候选是否实现本章策略，并让人物目标、阻力、选择、代价、关系或局面至少一项发生可感变化。不要因为保持谜团或安静场景就判失败。
+忽略人物名、地点、日期和道具名称，比较实际场景功能。先把候选作为完整章节判断：是否形成“人物欲望受到压力 → 至少一次关键选择或不可回避的行动 → 可感后果与章末变化”的整体弧线，并实现本章策略。不要逐幕检查目标、阻力、选择、代价和变化是否齐全；transition、reaction、atmosphere、setup 幕可以没有独立代价或重大状态变化，只要在整章节奏中有清楚作用。不要因为保持谜团、安静场景或单幕只负责连接而判失败。
+如果连续约三幕都让人物阅读、核对、汇报、签字、解释、开会或等待，即使人物、地点和材料不同，也属于相同互动机制的流程堆积。若冲突与代价只写在结构字段中，没有通过人物言行、受阻行动或后果实际发生，也不算有效推进。候选若只是让人物解释蓝图主题、重复制度程序，或把抽象命题直接当作对话内容，即使字段齐全也应建议改用人物欲望、关系摩擦、行动和后果承载潜台词。主题回声不明显不能单独判失败。
+通过前先做一次整章合并测试：幕表示自然场景，不表示一次场景内部的发现、争执、决定等节拍。如果相邻两幕没有明确的离场、时间跳跃或主要互动关系转换，仍处于同一时空并围绕同一主要冲突和决定过程，即使人物目标字段不同，也必须视为同一场戏；合并后不损失独立变化时判定未推进。如果删除某幕不影响因果、人物关系和章末状态，也说明该幕尚未成立。不要用给重复幕新增小故障或新物件的方式修复，应重新组织整场戏。
 只输出 JSON：{{"progressed":true或false,"summary":"整体判断","repeated_functions":[{{"current_beats":[幕号],"previous_chapters":[章号],"reason":"实际重复功能"}}],"missing_change":"缺失的实质变化或空","strategy_revision":"未推进时应怎样调整章节策略；已推进时为空"}}。"""
     if audit:
         audit.write("progress_review_request", prompt_chars=len(prompt), prompt=prompt)
@@ -1206,10 +1322,94 @@ def _review_story_progress(llm: ContinuationLLM, plan: dict, strategy: dict,
     return validate_progress_review(_first_json_object(raw))
 
 
+def _request_chapter_synopsis(settings: dict, llm: ContinuationLLM, strategy: dict,
+                              previous_context: str, audit=None,
+                              revision_feedback: str = "") -> str:
+    """Expand a strategy into continuous story movement before any beat schema exists."""
+    contract = {
+        "hard_constraints": list(strategy.get("hard_constraints") or [])[:8],
+        "desired_outcome": (str(strategy.get("desired_outcome") or "").strip()
+                            or str(strategy.get("ending_change") or "").strip()
+                            or str(strategy.get("primary_change") or "").strip()),
+        "preferences": list(strategy.get("preferences") or [])[:4],
+        "examples": list(strategy.get("examples") or [])[:3],
+    }
+    narrative_direction = {
+        key: strategy.get(key) for key in
+        ("opening_pressure", "central_choice", "cost", "avoid_repeating")
+        if strategy.get(key) not in (None, "", [])
+    }
+    ending_destination = _destination_only(strategy.get("ending_change") or "")
+    if ending_destination:
+        narrative_direction["ending_change"] = ending_destination
+    fixed_scenes = settings.get("_fixed_beat_count")
+    fixed_scenes = fixed_scenes if type(fixed_scenes) is int and 1 <= fixed_scenes <= 12 else None
+    scene_ceiling = fixed_scenes or max(1, min(12, int(settings.get("beats_per_chapter") or 10)))
+    scene_count_rule = (f"用户明确要求固定 {fixed_scenes} 个场景，必须恰好输出该数量。"
+                        if fixed_scenes else
+                        f"实际需要几个场景就输出几个，不接近任何目标数量。仅出于输出安全，最多 {scene_ceiling} 个场景。")
+    prompt = f"""你是长篇小说的章节主编。请先把本章写成可连续演出的场景化叙事梗概。场景边界将在这一步确定，后续步骤只负责结构化，不能再次拆分剧情。
+
+【本章叙事方向｜不是逐项任务清单】
+{json.dumps(narrative_direction, ensure_ascii=False)}
+【创作契约】
+{json.dumps(contract, ensure_ascii=False)}
+【上一章结尾与近期连续性】
+{previous_context[:6000] or '（未提供）'}
+【上一轮整章审查反馈】
+{revision_feedback or '（首次展开）'}
+
+使用“【场景】”作为自然场景分隔符，不编号、不写幕名、不输出 JSON。每个场景块写连续叙事；{scene_count_rule}
+先写人物进入本章时真正想做什么，让阻力来自人物立场、现实限制或行动后果；让一个动作自然引出下一个动作。至少有一次关键选择通过人物言行实际发生，并让代价在后续反应中可见。安静过渡可以只负责情绪、关系或时空连接，不必制造危机。
+把属于同一地点、同一主要冲突和同一决定过程的内容写成一场连续戏，不要把“提出决定、确认决定、签署决定”拆成三场。配角要影响处置时，优先让其拒绝背书、撤回支持、提出不同选择或迫使主角承担关系后果；不要为了给配角制造作用而临时增加重复抄件、编号错误、保管差错、新证据或神秘物件。主题只作为潜台词，不让人物宣讲规则或总结道理。
+根据本章内容自由选择表现重心；不同场景可以依靠对话、行动、关系摩擦、气氛、幽默、魔法体验或内心变化成立，不要求每场同时具备固定元素。不要按用户要求的条目数分场，多项要求可以在同一场戏中交织完成。同一观察、调查或关系过程中的多次短暂现象，可以在一场连续戏或简短蒙太奇中完成；“不同时间、地点或感官”不自动构成多个场景。若两段内容采用相同的“发现—制止—记录—离开”反应链，应重组人物选择，而不是仅更换异常外观。
+hard_constraints 只控制事实边界与禁区；desired_outcome 只规定故事最终抵达哪里，不规定中间步骤。preferences 可自由取舍组合，examples 不能逐项覆盖。先让人物行动形成一条连续因果，再确认结果自然抵达，不要反过来为清单逐条配戏。
+整章只选择一条最有张力的持续行动线作为现场核心；输入中若仍出现“第一次、第二次、中止、复看、随后”等阶段描述，只把它们理解为可能素材或前后状态，不得逐项演出。一个核心选择及其直接后果足以完成章节，不为展示所有过程另起复核、汇总、备案或私人记录场景。
+只输出叙事梗概正文。"""
+    if audit:
+        audit.write("chapter_synopsis_request", prompt_chars=len(prompt), prompt=prompt)
+    try:
+        raw = llm.complete(prompt, system="你只写连续的章节叙事梗概，不输出分幕或 JSON。",
+                           temperature=0.55, num_predict=2400, disable_thinking=True)
+    except Exception as exc:
+        if audit:
+            audit.write("chapter_synopsis_failed", error_type=type(exc).__name__, error=str(exc))
+        return ""
+    text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", raw or "",
+                  flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"```(?:markdown|text)?", "", text, flags=re.IGNORECASE).strip()
+    if audit:
+        audit.write("chapter_synopsis_response", response_chars=len(text), synopsis=text)
+    return text
+
+
+def _chapter_synopsis_scenes(synopsis: str, ceiling: int) -> list[str]:
+    """Read scene boundaries chosen by the synopsis model; never invent boundaries here."""
+    text = str(synopsis or "").strip()
+    if not text:
+        return []
+    standard = r"【场景(?:\s*\d+)?】"
+    if re.search(standard, text):
+        parts = [part.strip() for part in re.split(standard, text) if part.strip()]
+    else:
+        # Some providers preserve the requested scene boundaries but replace
+        # the literal marker with standalone location/title headings such as
+        # 【监督复核室】.  Treat those headings as boundaries instead of failing
+        # an otherwise usable synopsis or asking the model to rewrite content.
+        custom = r"(?m)^\s*【(?!场景(?:\s*\d+)?】)[^】\r\n]{1,40}】\s*$"
+        if not re.search(custom, text):
+            return []
+        parts = [part.strip() for part in re.split(custom, text) if part.strip()]
+    if len(parts) > ceiling:
+        raise ValueError(f"场景化梗概超过安全上限：{len(parts)} 个场景，最多 {ceiling} 个")
+    return parts
+
+
 def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
                          previous_context: str, wiki_history: str,
                          chapter_goal: str, audit=None, project_dir=None,
-                         chapter_number=None, progress=None, creative_request='') -> list[dict]:
+                         chapter_number=None, progress=None, creative_request='',
+                         preserve_beat_count: bool = False) -> list[dict]:
     """让独立审查轮只找问题，不让它一边批评一边重写。"""
     from core.plan_evidence import evidence_sources, verify_issue, continuity_state_records
     sources = evidence_sources(previous_context[:7500], wiki_history[:1800], draft)
@@ -1233,7 +1433,7 @@ def _review_chapter_plan(llm: ContinuationLLM, draft: dict, num_beats: int,
 {json.dumps(state_records, ensure_ascii=False)}
 【分类证据目录｜逐条引用对应来源编号】
 {json.dumps(sources, ensure_ascii=False)}
-本次审查恰好包含 {num_beats} 幕；只返回本步骤的 JSON 审查结果。"""
+候选当前包含 {num_beats} 幕。{'用户明确要求固定幕数，审查不得建议改变数量。' if preserve_beat_count else '当前数量不是目标；若相邻内容属于同一自然场景，必须指出并建议合并，允许重写后少于当前幕数。'}只返回本步骤的 JSON 审查结果。"""
 
     try:
         if audit:
@@ -1366,12 +1566,43 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     """为新章提出回目和分幕；只返回建议，不自动覆盖已保存计划。"""
     settings = {**settings, '_planning_mode':'rebuild'}
     creative_request = current_creation_request(settings)
+    chinese_counts = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+                      "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12}
+    fixed_target = settings.get("_fixed_beat_count")
+    if type(fixed_target) is not int:
+        fixed_target = None
+        match = re.search(
+            r"(?:必须|固定|恰好|严格|保持)[^。；\n]{0,40}?(1[0-2]|[1-9]|十一|十二|十|一|二|三|四|五|六|七|八|九)\s*幕",
+            creative_request)
+        if match:
+            token = match.group(1)
+            fixed_target = int(token) if token.isdigit() else chinese_counts.get(token)
+    fixed_count = isinstance(fixed_target, int) and 1 <= fixed_target <= 12
+    if fixed_count:
+        num_beats = fixed_target
+        settings["_fixed_beat_count"] = fixed_target
+    beat_ceiling = num_beats
     from core.plan_evidence import continuity_state_records
     continuity_records = continuity_state_records(wiki_history[:2200])
     def run_stage(name, function, *args, **kwargs):
         if stage_runner:
             return stage_runner(name, lambda: function(*args, **kwargs))
         return function(*args, **kwargs)
+    def request_scene_synopsis(stage, strategy, feedback=""):
+        """Generate scene prose and repair provider-specific heading drift once."""
+        synopsis = run_stage(stage, _request_chapter_synopsis,
+                             settings, llm, strategy, previous_context,
+                             audit=audit, revision_feedback=feedback)
+        scenes = _chapter_synopsis_scenes(synopsis, beat_ceiling)
+        if scenes:
+            return synopsis, scenes
+        format_feedback = ((feedback + "\n") if feedback else "") + (
+            "上次内容可以保留，但场景标题格式无效。必须把每个自然场景的标题统一替换为字面量"
+            "【场景】，不得使用【地点】、【人物】或自定义标题；每个场景前都要重复写【场景】。")
+        synopsis = run_stage(stage + "_format_retry", _request_chapter_synopsis,
+                             settings, llm, strategy, previous_context,
+                             audit=audit, revision_feedback=format_feedback)
+        return synopsis, _chapter_synopsis_scenes(synopsis, beat_ceiling)
     if progress:
         progress("正在判断长期故事阶段与本章实质变化（策略阶段）")
     direction = run_stage("strategy", _request_story_direction,
@@ -1379,8 +1610,42 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                           recent_context=previous_context)
     story_state = direction["story_state"]
     chapter_strategy = direction["strategy"]
-    prompt = f"""【程序指定目标章节】
-第 {settings.get('chapter_number', '')} 章；建议 {num_beats} 幕，可根据本章实际事件密度在 {max(1, num_beats - 1)}～{min(12, num_beats + 1)} 幕内选择。每幕必须有独立作用，不得为了凑数拆分同一事件。
+    def review_contract(strategy):
+        return json.dumps({
+            "hard_constraints": list(strategy.get("hard_constraints") or [])[:8],
+            "desired_outcome": (strategy.get("desired_outcome") or
+                                strategy.get("ending_change") or
+                                strategy.get("primary_change") or ""),
+        }, ensure_ascii=False)
+    contract_request = review_contract(chapter_strategy)
+    if audit:
+        audit.write("creative_contract_prepared",
+                    hard_constraints=chapter_strategy.get("hard_constraints") or [],
+                    desired_outcome=chapter_strategy.get("desired_outcome") or
+                                    chapter_strategy.get("ending_change") or "",
+                    preferences=chapter_strategy.get("preferences") or [],
+                    examples=chapter_strategy.get("examples") or [])
+    if progress:
+        progress("正在把章节策略展开为连续叙事梗概（暂不分幕）")
+    chapter_synopsis, scene_blocks = request_scene_synopsis("synopsis", chapter_strategy)
+    if not scene_blocks:
+        raise ValueError("场景化梗概未形成可识别的自然场景")
+    if fixed_count and len(scene_blocks) != fixed_target:
+        raise ValueError(f"用户要求固定 {fixed_target} 幕，但场景化梗概形成了 {len(scene_blocks)} 个场景")
+    num_beats = len(scene_blocks)
+
+    def build_draft_prompt(strategy, synopsis, scenes):
+        scene_source = "\n\n".join(
+            f"【场景源 {index}】\n{scene}" for index, scene in enumerate(scenes, 1))
+        contract = {
+            "hard_constraints": list(strategy.get("hard_constraints") or [])[:8],
+            "desired_outcome": (strategy.get("desired_outcome") or
+                                strategy.get("ending_change") or
+                                strategy.get("primary_change") or ""),
+        }
+        return f"""【程序指定目标章节】
+第 {settings.get('chapter_number', '')} 章。场景化梗概已经确定 {len(scenes)} 个自然场景；严格一份“场景源”对应一幕，保持原顺序。此步骤只负责结构化，不得拆分、合并、新增场景或重新设计剧情。结构字段从场景中提取；真实不存在的 goal、obstacle、choice、cost、change 使用空字符串，不得为了填字段补造事件。
+{'用户明确指定固定幕数，本次场景源已按该数量生成。' if fixed_count else '本次输入中“建议、至少、不少于、默认”等幕数措辞均已由场景化概要阶段消化，不再约束结构化输出；唯一有效数量是上述场景源数量。'}
 【全书背景】
 {settings.get('background', '')}
 【全书附加规则】
@@ -1393,12 +1658,13 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 {json.dumps(continuity_records, ensure_ascii=False)}
 【长期故事状态｜用于判断跨章推进，不替代正文事实】
 {json.dumps(story_state, ensure_ascii=False)}
-【本章策略｜各幕共同实现的变化】
-{json.dumps(chapter_strategy, ensure_ascii=False)}
-【本章目标】
-{settings.get('chapter_brief', '') or '承接上一章，自然推进情节'}
-{planning_input_prompt(settings)}
-只返回完整规划 JSON。"""
+【创作契约｜只用于核对事实边界和章末结果，不得据此新增场景】
+{json.dumps(contract, ensure_ascii=False)}
+【场景化叙事梗概｜场景边界是本步骤的唯一结构来源】
+{scene_source}
+不得把用户要求的不同条目各自分配成新幕；不得把场景源内部的提出、争执、决定、签署或反应拆开。只返回包含 {len(scenes)} 幕的完整规划 JSON。"""
+
+    prompt = build_draft_prompt(chapter_strategy, chapter_synopsis, scene_blocks)
 
     if progress:
         progress("正在根据章节策略生成分幕初稿")
@@ -1416,16 +1682,14 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         audit.write('planning_input_layers', **planning_inputs(settings))
     try:
         draft = run_stage("draft", _request_plan_json, llm, prompt, num_beats, temperature=0.4,
-                          audit=audit, stage="draft", allow_flexible_count=True)
+                          audit=audit, stage="draft", allow_flexible_count=False)
     except ValueError as exc:
         raise ValueError(f"章节规划初稿未通过：{exc}") from exc
-    preferred_beats = num_beats
-    num_beats = len(draft.get("beats") or [])
-    if audit and num_beats != preferred_beats:
-        audit.write("beat_count_selected", preferred_count=preferred_beats,
-                    actual_count=num_beats, policy="flexible_initial_plan")
-    if progress and num_beats != preferred_beats:
-        progress(f"模型按本章结构选择了 {num_beats} 幕，继续进行内容审查")
+    if audit:
+        audit.write("beat_count_selected", safety_ceiling=beat_ceiling,
+                    actual_count=num_beats, policy="synopsis_scene_boundaries")
+    if progress:
+        progress(f"场景化梗概形成 {num_beats} 个自然场景，正在按一场一幕结构化")
 
     if progress:
         progress("正在比较近期章节功能与本章实质推进")
@@ -1449,12 +1713,21 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                                       settings, llm, project_dir, audit=audit, feedback=feedback,
                                       recent_context=previous_context)
         story_state = revised_direction["story_state"]
-        old_strategy_json = json.dumps(chapter_strategy, ensure_ascii=False)
         chapter_strategy = revised_direction["strategy"]
-        prompt = prompt.replace(old_strategy_json,
-                                json.dumps(chapter_strategy, ensure_ascii=False), 1)
+        contract_request = review_contract(chapter_strategy)
+        if progress:
+            progress("正在按整章反馈重写连续叙事梗概")
+        chapter_synopsis, scene_blocks = request_scene_synopsis(
+            "synopsis_retry", chapter_strategy, feedback)
+        if not scene_blocks:
+            raise ValueError("重写后的场景化梗概缺少【场景】边界")
+        if fixed_count and len(scene_blocks) != fixed_target:
+            raise ValueError(f"用户要求固定 {fixed_target} 幕，但重写梗概形成了 {len(scene_blocks)} 个场景")
+        num_beats = len(scene_blocks)
+        prompt = build_draft_prompt(chapter_strategy, chapter_synopsis, scene_blocks)
         draft = run_stage("redraft", _request_plan_json, llm, prompt, num_beats,
-                          temperature=0.45, audit=audit, stage="draft")
+                          temperature=0.45, audit=audit, stage="draft",
+                          allow_flexible_count=False)
         try:
             progress_review = run_stage("progress_recheck", _review_story_progress,
                                         llm, draft, chapter_strategy, story_state, audit=audit)
@@ -1463,13 +1736,29 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                                "summary": "重新规划已完成，跨章复核未完成。",
                                "repeated_functions": [], "missing_change": "",
                                "strategy_revision": "", "check_failed": str(exc)}
+    progress_recheck_issue = None
     if progress:
-        progress("正在独立审查连续性、因果与证据边界")
+        progress("正在按整章弧线审查推进、重复功能与连续性")
     review_issues = run_stage("review", _review_chapter_plan,
         llm, draft, num_beats, previous_context, wiki_history,
-        str(settings.get('chapter_brief') or ''), audit=audit, project_dir=project_dir,
+        str(chapter_strategy.get('desired_outcome') or chapter_strategy.get('ending_change') or ''),
+        audit=audit, project_dir=project_dir,
         chapter_number=settings.get('chapter_number'), progress=progress,
-        creative_request=creative_request)
+        creative_request=contract_request, preserve_beat_count=fixed_count)
+    if not progress_review.get("progressed"):
+        progress_recheck_issue = {
+            "severity": "high",
+            "scope": "整章推进与场景组织",
+            "problem": progress_review.get("summary") or "重新规划后仍存在重复场景功能",
+            "suggestion": progress_review.get("strategy_revision") or
+                          progress_review.get("missing_change") or "回到场景梗概重组整章因果",
+            "evidence_verified": True,
+            "evidence_state": "workflow_review",
+            "citations": [],
+        }
+        review_issues.append(progress_recheck_issue)
+        if audit:
+            audit.write("progress_recheck_blocked", issue=progress_recheck_issue)
     data = draft
     substantive_issues = [item for item in review_issues
                           if str(item.get("severity") or "low").lower() in ("high", "medium")
@@ -1485,24 +1774,27 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                 scope = str(item.get("scope") or "相关分幕").strip()
                 severity = str(item.get("severity") or "medium").lower()
                 progress(f"规划审查提醒 · {scope} · {severity}")
-        rewrite_prompt = f"""你是长篇小说的章节主编。请根据独立审查意见重写规划初稿。
-
-【原始任务与依据】
-{prompt}
-
-【规划初稿】
-{json.dumps(draft, ensure_ascii=False)}
-【独立审查意见】
-{json.dumps(substantive_issues, ensure_ascii=False)}
-
-重写要求：
-1. 逐项解决审查意见，同时保留初稿中未受影响的有效人物线和线索。
-2. 对重复既有内容的幕，不能只换幕名、地点、措辞或时间；必须替换其剧情功能，使其产生新的信息、决定、阻碍或关系变化。
-3. 可以合并功能重复的内容，但最终仍须恰好 {num_beats} 幕；空出的幕用于推进尚未完成的线索或引入一个自然的新变化。
-4. 不输出修改说明。严格使用原始任务要求的 JSON 结构，只输出完整 JSON。"""
         try:
-            data = run_stage("rewrite", _request_plan_json, llm, rewrite_prompt, num_beats, temperature=0.2,
-                                      audit=audit, stage="rewrite")
+            synopsis_feedback = (
+                "独立审查发现当前故事或场景边界存在问题。请回到场景化梗概重写，"
+                "不要直接修补分幕 JSON，也不要为保留幕数新增事件。\n" +
+                json.dumps(substantive_issues, ensure_ascii=False))
+            rewritten_synopsis, rewritten_scenes = request_scene_synopsis(
+                "synopsis_review_rewrite", chapter_strategy, synopsis_feedback)
+            if not rewritten_scenes:
+                raise ValueError("审查后重写的场景化梗概缺少【场景】边界")
+            if fixed_count and len(rewritten_scenes) != fixed_target:
+                raise ValueError(
+                    f"用户要求固定 {fixed_target} 幕，但审查后梗概形成了 {len(rewritten_scenes)} 个场景")
+            rewritten_count = len(rewritten_scenes)
+            rewritten_prompt = build_draft_prompt(
+                chapter_strategy, rewritten_synopsis, rewritten_scenes)
+            rewritten_data = run_stage(
+                "rewrite", _request_plan_json, llm, rewritten_prompt, rewritten_count,
+                temperature=0.2, audit=audit, stage="rewrite",
+                allow_flexible_count=False)
+            chapter_synopsis, scene_blocks = rewritten_synopsis, rewritten_scenes
+            num_beats, prompt, data = rewritten_count, rewritten_prompt, rewritten_data
         except ValueError as exc:
             if stage_runner:
                 raise
@@ -1513,7 +1805,8 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
         progress("初审未发现证据充分的剧情问题，保留初稿；低风险提醒见完整日志")
 
     final_source = "rewrite" if data is not draft else "draft"
-    validation_status = "initial_review_only"
+    validation_status = ("needs_review" if progress_recheck_issue
+                         else "initial_review_only")
     all_editorial_notes = [dict(item, review_stage="initial") for item in review_issues
                           if item.get("severity") == "low" or not item.get("evidence_verified")]
     if any(item.get("check_failed") for item in review_issues):
@@ -1544,7 +1837,7 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             progress("正在验收重写后的规划")
         acceptance = run_stage("acceptance", _validate_rewritten_plan,
             llm, draft, data, [item for item in review_issues if item.get("evidence_verified")],
-            num_beats, previous_context, audit=audit, creative_request=creative_request)
+            num_beats, previous_context, audit=audit, creative_request=contract_request)
         acceptance_issues = list(acceptance.get("unresolved") or []) + list(
             acceptance.get("new_issues") or [])
         editorial_notes = list(acceptance.get("editorial_notes") or [])
@@ -1558,42 +1851,48 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             validation_status = "needs_review"
             if progress:
                 progress(f"后验收发现 {len(acceptance_issues)} 个待修补问题，"
-                         "正在进行一次局部修补（条件阶段）")
+                         "正在回到连续叙事梗概重组")
                 for item in acceptance_issues:
                     scope = str(item.get("scope") or "相关分幕").strip()
                     progress(f"后验收提醒 · {scope}")
-            patch_prompt = f"""你是章节规划的修订编辑。只对验收未通过之处做一次最小局部修补。
-
-【近期连续性上下文】
-{previous_context[:7500] or '（未提供）'}
-【当前重写稿】
-{json.dumps(data, ensure_ascii=False)}
-【验收未通过项】
-{json.dumps(acceptance_issues, ensure_ascii=False)}
-【低风险编辑提醒】
-{json.dumps(editorial_notes, ensure_ascii=False)}
-
-要求：
-1. 逐项修复验收问题；未涉及的幕、线索和节奏保持不变。
-2. 只能做解决问题所需的最小改动，不重新构思整章，不增加新的主要人物线或设定。
-3. 修改幕内时间、地点或决定时，同步修正该幕的 known_before、new_facts、desc 和 end_state。
-4. 恰好保留 {num_beats} 幕，并使用原规划相同的完整 JSON 结构。只输出 JSON。"""
             try:
-                data = run_stage("local_patch", _request_plan_json,
-                    llm, patch_prompt, num_beats, temperature=0.1,
-                    audit=audit, stage="local_patch")
-                final_source = "local_patch"
-                validation_status = "patched_pending_review"
+                acceptance_feedback = (
+                    "验收发现的是剧情组织或场景边界问题。请重写连续梗概，不要修补 JSON，"
+                    "不要为保留当前幕数增加说明、复核或汇总场景；允许合并场景。\n"
+                    "【当前连续梗概】\n" + chapter_synopsis + "\n"
+                    "【验收未通过项】\n" + json.dumps(acceptance_issues, ensure_ascii=False))
+                acceptance_synopsis, acceptance_scenes = request_scene_synopsis(
+                    "acceptance_synopsis_rewrite", chapter_strategy,
+                    acceptance_feedback)
+                if not acceptance_scenes:
+                    raise ValueError("验收回退后的场景化梗概缺少【场景】边界")
+                if fixed_count and len(acceptance_scenes) != fixed_target:
+                    raise ValueError(
+                        f"用户要求固定 {fixed_target} 幕，但验收回退后形成了 {len(acceptance_scenes)} 个场景")
+                acceptance_count = len(acceptance_scenes)
+                acceptance_prompt = build_draft_prompt(
+                    chapter_strategy, acceptance_synopsis, acceptance_scenes)
+                acceptance_data = run_stage("acceptance_rewrite", _request_plan_json,
+                    llm, acceptance_prompt, acceptance_count, temperature=0.2,
+                    audit=audit, stage="acceptance_rewrite", allow_flexible_count=False)
+                chapter_synopsis, scene_blocks = acceptance_synopsis, acceptance_scenes
+                num_beats, prompt, data = (
+                    acceptance_count, acceptance_prompt, acceptance_data)
+                final_source = "acceptance_rewrite"
+                validation_status = "acceptance_rewrite_pending_review"
                 if audit:
-                    audit.write("local_patch_applied", fixed_issues=acceptance_issues,
-                                editorial_notes=editorial_notes)
+                    audit.write("acceptance_synopsis_rewrite_applied",
+                                fixed_issues=acceptance_issues,
+                                scene_count=num_beats, editorial_notes=editorial_notes)
                 if progress:
-                    progress("正在最终复核局部修补后的完整规划")
+                    progress("正在最终复核验收回退后的完整规划")
                 final_review = run_stage("final_review", _review_chapter_plan,
                     llm, data, num_beats, previous_context, wiki_history,
-                    settings.get("chapter_brief", ""), audit=audit,
+                    str(chapter_strategy.get('desired_outcome') or
+                        chapter_strategy.get('ending_change') or ''), audit=audit,
                     project_dir=project_dir, chapter_number=settings.get("chapter_number"),
-                    progress=progress, creative_request=creative_request)
+                    progress=progress, creative_request=contract_request,
+                    preserve_beat_count=fixed_count)
                 final_substantive = [item for item in final_review
                                      if item.get("severity") in {"high", "medium"}
                                      and item.get("evidence_verified")]
@@ -1611,14 +1910,14 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                 else:
                     validation_status = "passed"
                     if progress:
-                        progress("局部修补后的最终复核通过")
+                        progress("验收回退后的最终复核通过")
             except ValueError as exc:
                 if stage_runner:
                     raise
                 if progress:
-                    progress(f"提醒：局部修补未通过结构检查，保留重写稿：{exc}")
+                    progress(f"提醒：验收回退未通过结构检查，保留前一版重写稿：{exc}")
                 if audit:
-                    audit.write("local_patch_rejected", error=str(exc))
+                    audit.write("acceptance_synopsis_rewrite_rejected", error=str(exc))
         else:
             validation_status = "passed"
             if progress:
@@ -1647,27 +1946,26 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                         progress("提醒：后验收文字规范未完成，保留通过剧情验收的版本和提醒")
     elif audit:
         audit.write("acceptance_skipped", reason="初审未触发有效重写")
-    if data is not draft:
-        try:
-            progress_review = run_stage("final_progress_review", _review_story_progress,
-                                        llm, data, chapter_strategy, story_state, audit=audit)
-            if not progress_review.get("progressed"):
-                validation_status = "needs_review"
-                all_editorial_notes.append({
-                    "scope": "跨章故事推进",
-                    "problem": progress_review.get("summary") or "当前候选仍与近期章节功能重复",
-                    "suggestion": progress_review.get("strategy_revision") or
-                                  progress_review.get("missing_change") or "请调整本章策略",
-                    "review_stage": "final_progress_review",
-                })
-        except Exception as exc:
-            if audit:
-                audit.write("final_progress_review_incomplete",
-                            error_type=type(exc).__name__, error=str(exc))
-    if audit:
-        audit.write("final_plan_selected", source=final_source,
-                    validation_status=validation_status,
-                    review_issues_count=len(review_issues), editorial_notes=all_editorial_notes, plan=data)
+    try:
+        progress_review = run_stage("final_progress_review", _review_story_progress,
+                                    llm, data, chapter_strategy, story_state, audit=audit)
+        if not progress_review.get("progressed"):
+            validation_status = "needs_review"
+            all_editorial_notes.append({
+                "scope": "跨章故事推进",
+                "problem": progress_review.get("summary") or "当前候选仍与近期章节功能重复",
+                "suggestion": progress_review.get("strategy_revision") or
+                              progress_review.get("missing_change") or "请调整本章策略",
+                "review_stage": "final_progress_review",
+            })
+        elif validation_status == "initial_review_only":
+            validation_status = "passed"
+    except Exception as exc:
+        if validation_status == "initial_review_only":
+            validation_status = "incomplete"
+        if audit:
+            audit.write("final_progress_review_incomplete",
+                        error_type=type(exc).__name__, error=str(exc))
     all_editorial_notes.extend({"scope": "规划建议", "problem": note,
                                 "review_stage": "structure_advisory"}
                                for note in _chapter_plan_advisories(data))
@@ -1678,7 +1976,13 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
     beats = _parse_beats(json.dumps(data.get("beats"), ensure_ascii=False), num_beats)
     if not title or len(beats) != num_beats:
         raise ValueError("章节规划缺少回目或分幕数量不符。")
+    if audit:
+        audit.write("final_plan_selected", source=final_source,
+                    validation_status=validation_status,
+                    review_issues_count=len(review_issues),
+                    editorial_notes=all_editorial_notes, plan=data)
     return {"chapter_title": title, "beats": beats,
+            "chapter_synopsis": chapter_synopsis,
             "chapter_strategy": chapter_strategy,
             "progress_review": progress_review,
             "planning_review": {"status": validation_status, "source": final_source,
@@ -1743,14 +2047,14 @@ def revise_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
 1. 按完整目标解决用户指出的问题，不把举例或备选拆成必须同时满足的指令；问题之间冲突时，优先保证原文事实、时间线和人物信息权限。
 2. 不得删除未被问题影响的重要情节，也不得借修订引入另一套无关剧情。
 3. 第一幕须与上一章保持可解释的时间线或事件连续性，允许自然切换人物线；通常聚焦一至两条主要人物线，必要时可增加视角。
-4. 各幕须有可解释的故事作用，不得用不同措辞重复同一功能。变化可以是信息、选择、关系或局面；允许有效静场，不强求每幕出现新事件或反转。
+4. 先保证整章具有欲望或压力、至少一次关键选择或行动及可感后果。各幕只须有可解释的叙事作用，不得用不同措辞重复同一功能；反应、过渡、气氛、伏笔幕可以没有独立代价或重大变化，不得为填字段制造虚假冲突。
 5. 允许保留或调整原规划中的新增元素，通常聚焦一个，但不以数量限制合理创作；普通线索材料放入 new_facts 即可。
 6. 自检完整目标和修改牵动的逻辑：人物信息与物件先取得后使用，推测不直接升级为事实，线索并置不等于因果确认。直接替换原有内容，同步相关幕和状态，不追加重复的新旧说明。desc 只写场景事件，不复制旧稿中已知信息、新增信息和结尾状态的附注；这些内容在对应结构字段更新。不要输出自检报告或修改说明。
 7. 动态上下文中已经完成的内容不得原样重演；章末状态是修订起点，若发生变化必须保留自然过程。若分幕记录与正文摘要冲突，以正文摘要和正文结尾为准。
 8. 根据上一章结尾状态承接事件顺序；倒叙或并行场景须明确说明，无法确定日期时使用自然的相对时间。只有日期参与证据、期限或行动时才写具体日期和钟点，不为每幕补充时间刻度。情绪未解决不等于既有信息尚未告知，不得把新态度写成首次获知。
 
 输出严格 JSON 对象：
-{{"title":"本章回目","beats":[{{"num":"一","name":"幕名","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"简短类别","source_or_entry":"如何自然进入当前剧情","future_use":"后续用途"}}],"desc":"本幕具体事件","end_state":"幕末状态与未完成线索"}}]}}。
+{{"title":"本章回目","beats":[{{"num":"一","name":"幕名","beat_type":"dramatic / reaction / transition / atmosphere / setup / payoff","pov":"本幕视角人物","time":"相对上一幕的时间","location":"地点","thread":"故事线","goal":"即时意图或空","obstacle":"实际阻力或空","choice":"有分量的选择或空","cost":"实际代价或空","change":"本幕变化或空","known_before":["本幕开始前视角人物已知的信息"],"new_facts":["本幕获得的新信息"],"new_elements":[{{"name":"新增元素名","type":"简短类别","source_or_entry":"如何自然进入当前剧情","future_use":"后续用途"}}],"desc":"本幕具体事件","end_state":"幕末状态与未完成线索"}}]}}。
 没有主要新增元素的幕输出 "new_elements":[]；恰好 {num_beats} 幕。只输出 JSON。"""
     data = None
     parse_error = None
@@ -1916,12 +2220,13 @@ def _chapter_plan_issues(data: dict, num_beats: int, previous_context: str) -> l
         return [f"必须恰好输出 {num_beats} 幕"]
     if not str(data.get("title") or "").strip():
         issues.append("章节规划缺少回目文字")
-    required = ("desc",)
+    required = ("num", "name", "pov", "time", "location", "desc", "end_state")
     for index, beat in enumerate(beats, 1):
         if not isinstance(beat, dict):
             issues.append(f"第 {index} 幕不是对象")
             continue
-        missing = [key for key in required if not beat.get(key)]
+        missing = [key for key in required
+                   if key not in beat or not str(beat.get(key) or "").strip()]
         if beat.get("desc") and (not isinstance(beat["desc"], str) or not beat["desc"].strip()):
             issues.append(f"第 {index} 幕 desc 必须是有效文本")
         for key in ("known_before", "new_facts", "new_elements"):

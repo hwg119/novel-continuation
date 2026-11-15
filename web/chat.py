@@ -187,21 +187,29 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                     'chapters': [{'number': n, 'file': name} for n, name, _ in files[-15:]],
                     'plan': settings_for_chapter(settings, chapter) if chapter else {},
                     'conversation': history_text[-18:]}
-                from core.story_blueprint import load_blueprint_candidate, load_story_blueprint
-                accepted_blueprint = load_story_blueprint(path)
+                from core.story_blueprint import blueprint_for_planning, load_blueprint_candidate
                 pending_blueprint = load_blueprint_candidate(path)
+                # The complete blueprint can exceed twenty thousand characters
+                # and made even a simple dialogue turn time out before the first
+                # tool call.  Dialogue receives the chapter-relevant planning
+                # scope; blueprint jobs still load the complete file themselves.
                 context['story_blueprint'] = {
-                    'source_state':'accepted_long_range_plan',
-                    'facts_through_chapter':accepted_blueprint.get('facts_through_chapter',0),
-                    'plan':accepted_blueprint.get('plan') or {},
-                    'fact_statements':[row.get('statement') for row in (accepted_blueprint.get('facts') or [])[-12:]],
+                    'source_state':'accepted_long_range_plan_relevant_scope',
+                    **blueprint_for_planning(path, chapter),
                 }
                 if pending_blueprint:
                     pending_value = pending_blueprint['candidate']
+                    pending_plan = pending_value.get('plan') or {}
+                    nearby_routes = [row for row in pending_plan.get('chapter_roadmap') or []
+                                     if isinstance(row, dict) and (not chapter or
+                                         abs(int(row.get('chapter') or 0) - int(chapter)) <= 2)]
                     context['story_blueprint_candidate'] = {
                         'source_state':'candidate_not_applied',
-                        'plan':pending_value.get('plan') or {},
-                        'proposals':pending_value.get('proposals') or [],
+                        'plan_summary': {key: pending_plan.get(key) for key in
+                                         ('premise','destination','ending_state')},
+                        'nearby_chapter_roadmap': nearby_routes,
+                        'proposals':(pending_value.get('proposals') or [])[-3:],
+                        'full_candidate_available_on_blueprint_page': True,
                     }
                 previous_context = enrich_chat_context(context, path, chapter)
                 if chapter:

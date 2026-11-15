@@ -2,6 +2,7 @@
 import json
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -49,6 +50,9 @@ def friendly_model_error(exc):
     """Keep provider details, but explain tool-call capability failures plainly."""
     message=str(exc or '').strip()
     lowered=message.lower()
+    if 'recursion limit' in lowered or 'graph_recursion_limit' in lowered:
+        return ('对话代理连续调用工具后仍未收束。本轮没有自动执行新的任务；'
+                '请重试，或把要求缩小为一个明确操作。')
     tool_markers=('tool calling','tool_call','tool call','tools are not supported',
                   'does not support tools','does not support tool','unsupported tools',
                   'function calling','function_call')
@@ -115,18 +119,21 @@ def build_agent(model, system_prompt, call, callback=None):
         if query: arguments['query']=query
         return call('read',arguments)
 
-    @tool
+    @tool(return_direct=True)
     def propose_action(tool_name:Literal['plan','plan_revision','generate','consistency','revise','illustration','blueprint','view','navigate'], chapter:int, requirements:str='', target_artifact_id:str|None=None,
                        selection_reason:str='', source_request_turn:str|None=None,
                        revision_scope:Literal['local','structural','regenerate']='local',
                        blueprint_mode:Literal['create','adjust','regenerate']|None=None,
                        navigation:list[str]|None=None) -> dict:
         """提出操作而非直接执行。plan=从零构建；plan_revision=修改已有分幕，其中 revision_scope=local 是局部修补，structural 是保留正文事实但放弃旧幕结构，regenerate 是完全重新规划；generate=续写；consistency=审校保存正文；revise=修改正文；illustration=生成插图；blueprint=故事蓝图，必须指定 blueprint_mode：create 建立首版、adjust 增量调整、regenerate 保留正文事实与锁定项但重新设计其余结构；view=查看正文；navigate=页面导航。修改已有分幕选 plan_revision 并给 plan 对象 ID；修改正文选 revise 并给 text 对象 ID。用户明确要求执行才调用，讨论不要调用。"""
-        return call('propose',{'tool':tool_name,'chapter':chapter,'requirements':requirements,
+        result=call('propose',{'tool':tool_name,'chapter':chapter,'requirements':requirements,
             'target_artifact_id':target_artifact_id,'artifact_selection_reason':selection_reason,
             'source_request_turn':source_request_turn,'revision_scope':revision_scope,
             'blueprint_mode':blueprint_mode,
             'navigation':navigation or []})
+        if isinstance(result,dict) and result.get('error'):
+            raise ValueError(str(result['error']))
+        return result
 
     return create_deep_agent(model=model,tools=[load_skill,read_conversation_turn,list_artifacts,read_artifact,read_evidence,propose_action],
         system_prompt=system_prompt + '\n你是对话创作助手。用工具按需了解对象和证据，自主决定下一步。'
@@ -136,6 +143,9 @@ def build_agent(model, system_prompt, call, callback=None):
         '旧助手结论只是待核对意见，不是证据；重新评估既不要求赞同旧结论，也不要求找出新问题。'
         '结合完整对话判断承接关系和实际目标，requirements 必须是自包含、具体的业务操作要求，'
         '包含用户确认采用的前文建议与补充限制。用户的确认、评价和版本选择不是创作内容指令；'
+        '整理分幕生成或结构重写要求时，不得自行添加“至少/恰好/不少于几幕”等数量限制；只有用户当前明确要求固定幕数时才能保留。'
+        '不得同时写入互相冲突的条件，例如“至少两次目击”与“不得第二次目击”；发现冲突时优先按用户最新确认的目标消解，无法判断才询问。'
+        'requirements 应优先描述必须达到的剧情结果，不为每项结果指定一场独立执行流程，多项结果允许在同一自然场景中交织完成。'
         '修改已有分幕时判断范围：具体某幕、措辞、时间或局部因果用 local；用户认为节奏、故事方向、长期推进或整章结构有问题并要求重写时用 structural；明确要求完全另起方案时用 regenerate。'
         '蓝图操作必须区分：无现有蓝图时用 create；沿用现有结构并局部修改用 adjust；只保留正文事实和锁定项、重新设计其余结构用 regenerate。已有蓝图时，用户仅说“生成/建立蓝图”而没有说明沿用还是重做，必须先自然语言询问，不能擅自提交操作。'
         '上下文不足以确定目标时才追问。每次只提出一个操作；提出成功后简短说明已生成操作卡片、等待用户执行。'
@@ -189,7 +199,10 @@ def run(request, model=None, call=None):
     budget_guidance=(f'本轮最多允许 {MODEL_CALL_BUDGET} 次模型调用。查阅资料时优先最小范围证据；'
                      '第 6 次调用后不得再发起新的查阅或技能加载，应基于已有资料调用操作或给出正式答复。')
     agent=build_agent(model,request['system_prompt']+'\n'+budget_guidance,call or rpc)
-    invocation={'recursion_limit':16,'callbacks':[logger]}
+    # A tool round consumes both a model and a tool graph step.  Keep a small
+    # margin for the final response while the independent model-call budget
+    # remains the real hard stop.  Successful proposals terminate directly.
+    invocation={'recursion_limit':MODEL_CALL_BUDGET*2+2,'callbacks':[logger]}
     try:
         result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
             '\n【本次用户消息】\n'+request['text']}]},config=invocation)
@@ -206,21 +219,32 @@ def run(request, model=None, call=None):
         elif managed_model and logger.responses == 0 and transient_connection_error(exc):
             # Nothing has been returned and no tool can have run yet, so replaying
             # the first turn is safe. Never replay a later turn after tool effects.
-            send({'type':'progress','text':'模型连接中断，正在重试首次请求',
-                  'details':{'event':'connection_retry','attempt':2}})
-            agent=build_agent(configured_model(extra),request['system_prompt']+'\n'+budget_guidance,
-                              call or rpc)
-            try:
-                result=agent.invoke({'messages':[{'role':'user','content':json.dumps(request['context'],ensure_ascii=False)+
-                    '\n【本次用户消息】\n'+request['text']}]},config=invocation)
-            except Exception as retry_exc:
+            retry_exc = exc
+            for retry_attempt in (2, 3):
+                send({'type':'progress','text':'模型连接中断，正在重试首次请求',
+                      'details':{'event':'connection_retry','attempt':retry_attempt}})
+                if retry_attempt > 2:
+                    time.sleep(1.0)
+                agent=build_agent(configured_model(extra),
+                                  request['system_prompt']+'\n'+budget_guidance, call or rpc)
+                try:
+                    result=agent.invoke({'messages':[{'role':'user','content':
+                        json.dumps(request['context'],ensure_ascii=False)+
+                        '\n【本次用户消息】\n'+request['text']}]},config=invocation)
+                    break
+                except Exception as caught:
+                    retry_exc = caught
+            else:
                 raise ValueError(friendly_model_error(retry_exc)) from retry_exc
         else:
             raise ValueError(friendly_model_error(exc)) from exc
     message=result['messages'][-1]
     from tools.deepagents.reply_display import public_reply
     from tools.deepagents.reply_contract import unfulfilled_action_promise
-    reply=public_reply(message.content)
+    if getattr(message,'name','')=='propose_action':
+        reply='已生成操作卡片，请确认后执行。'
+    else:
+        reply=public_reply(message.content)
     if unfulfilled_action_promise(reply):
         # Give the model one chance to honor the operation contract. This keeps
         # intent resolution with the model instead of hard-coding chapter rules.

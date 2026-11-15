@@ -100,7 +100,17 @@ def run_trial(config,context,text,guide,backend,emit,running,command=None):
                             raise ValueError('操作名无效；可选 plan/plan_revision/generate/consistency/revise/illustration/blueprint/view/navigate。修改已有分幕使用 plan_revision')
                         if type(number) is not int or number<1: raise ValueError('章号无效')
                         if tool=='plan' and args.get('target_artifact_id'):
-                            raise ValueError('plan 从零构建不使用旧稿；如修改选定的分幕请用 plan_revision')
+                            # The intent is unambiguous: a selected plan object
+                            # means the user is replacing or revising that plan.
+                            # Providers occasionally keep the generic ``plan``
+                            # label while correctly supplying the target and a
+                            # regenerate scope.  Normalize the route instead of
+                            # failing an otherwise valid, expensive dialogue run.
+                            tool='plan_revision'
+                            args={**args,'tool':tool,
+                                  'revision_scope':args.get('revision_scope') or 'regenerate'}
+                            audit.write('tool_route_corrected',from_tool='plan',
+                                        to_tool=tool,reason='selected_plan_target')
                         scope = args.get('revision_scope') or 'local'
                         if scope not in {'local','structural','regenerate'}:
                             raise ValueError('分幕修订范围无效')

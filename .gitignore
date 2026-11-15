@@ -23,6 +23,7 @@ workspace/
 
 # 本地 embedding 模型
 models/
+tools/embedding/.cache/
 corpus_txt/
 _*
 tests/*

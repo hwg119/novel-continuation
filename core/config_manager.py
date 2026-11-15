@@ -87,7 +87,7 @@ DEFAULT_CONFIG = {
     "continuation_defaults": {
         "chars_per_beat": 600,
         "temperature": 0.8,
-        "beats_per_chapter": 6,
+        "beats_per_chapter": 10,
     },
 }
 

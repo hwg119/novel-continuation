@@ -7,7 +7,7 @@
   "chapter_number": 6,
   "chapter_title": "潮汐表的空白一页",
   "chars_per_beat": 500,
-  "beats_per_chapter": 6,
+  "beats_per_chapter": 10,
   "temperature": 0.75,
   "llm_config_name": "",
   "system_prompt": "你是一位悬疑幻想小说作者。延续克制、清晰、重视物证与人物选择的叙事，只输出正文。",

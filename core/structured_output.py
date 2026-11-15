@@ -23,6 +23,7 @@ class PlanElement(_FlexibleModel):
 class PlanBeat(_FlexibleModel):
     num: str | int | None = None
     name: str = ""
+    beat_type: str = "dramatic"
     pov: str = ""
     time: str = ""
     location: str = ""
@@ -81,6 +82,13 @@ class ChapterStrategy(_FlexibleModel):
     reader_question_before: str = ""
     reader_question_after: str = ""
     avoid_repeating: list[str] = Field(default_factory=list)
+    surface_story: str = ""
+    scene_texture: dict = Field(default_factory=dict)
+    theme_echo: str = ""
+    hard_constraints: list[str] = Field(default_factory=list)
+    desired_outcome: str = ""
+    preferences: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
 
 
 class StoryDirection(_FlexibleModel):
@@ -105,6 +113,9 @@ class BlueprintFact(_FlexibleModel):
 
 
 class BlueprintPlan(_FlexibleModel):
+    theme_question: str = ""
+    theme_tension: str = ""
+    narrative_palette: list[dict] = Field(default_factory=list)
     premise: str = ""
     destination: str = ""
     ending_state: str = ""

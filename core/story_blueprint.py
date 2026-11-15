@@ -65,10 +65,29 @@ def _roadmap_keys(rows: list) -> set[int]:
             if isinstance(row, dict) and type(row.get("chapter")) is int}
 
 
+def _is_complete_planning_window(chapters: set[int], written_through: int) -> bool:
+    """Recognize a full regenerated near-term route, even if it ends earlier.
+
+    A redesign may legitimately replace an old ten-chapter window with six to
+    nine chapters.  Treating that as a partial patch merely because its chapter
+    numbers are a strict subset prevents an otherwise complete candidate from
+    being accepted.
+    """
+    if not 6 <= len(chapters) <= 10:
+        return False
+    ordered = sorted(chapters)
+    return (ordered[0] == int(written_through) + 1
+            and ordered == list(range(ordered[0], ordered[-1] + 1)))
+
+
 def _merge_partial_candidate_roadmap(current: dict[str, Any],
                                      candidate: dict[str, Any]) -> dict[str, Any]:
     """Preserve untouched accepted chapters in an incremental candidate."""
-    current_rows = (current.get("plan") or {}).get("chapter_roadmap") or []
+    written_through = int(candidate.get("facts_through_chapter") or 0)
+    current_rows = [row for row in (current.get("plan") or {}).get("chapter_roadmap") or []
+                    if not isinstance(row, dict)
+                    or type(row.get("chapter")) is not int
+                    or row.get("chapter") > written_through]
     candidate_plan = candidate.get("plan") or {}
     incoming_rows = candidate_plan.get("chapter_roadmap") or []
     merged = _merge_partial_roadmap(current_rows, incoming_rows)
@@ -179,6 +198,7 @@ def empty_blueprint() -> dict[str, Any]:
         "facts_through_chapter": 0,
         "facts": [],
         "plan": {
+            "theme_question": "", "theme_tension": "", "narrative_palette": [],
             "premise": "", "destination": "", "ending_state": "",
             "phases": [], "arcs": [], "milestones": [], "chapter_roadmap": [],
         },
@@ -221,14 +241,18 @@ def save_story_blueprint(project_dir: str, blueprint: dict[str, Any]) -> bool:
     from core.structured_output import validate_story_blueprint
     current = load_story_blueprint(project_dir)
     candidate = validate_story_blueprint(blueprint)
-    current_chapters = _roadmap_keys(
+    written_through = int(candidate.get("facts_through_chapter") or 0)
+    current_chapters = {chapter for chapter in _roadmap_keys(
         (current.get("plan") or {}).get("chapter_roadmap") or [])
+        if chapter > written_through}
     submitted_chapters = _roadmap_keys(
         (candidate.get("plan") or {}).get("chapter_roadmap") or [])
     candidate = _merge_partial_candidate_roadmap(current, candidate)
     candidate = validate_story_blueprint(candidate)
-    if submitted_chapters and submitted_chapters < current_chapters and _roadmap_keys(
-            (candidate.get("plan") or {}).get("chapter_roadmap") or []) != current_chapters:
+    if (submitted_chapters and submitted_chapters < current_chapters
+            and not _is_complete_planning_window(submitted_chapters, written_through)
+            and _roadmap_keys((candidate.get("plan") or {}).get(
+                "chapter_roadmap") or []) != current_chapters):
         raise ValueError("候选章节路线不完整且无法安全合并；请重新执行局部调整，正式蓝图未改变")
     locked = {str(row.get("id")): row for row in current.get("facts") or []
               if isinstance(row, dict) and row.get("locked") and row.get("id")}
@@ -408,17 +432,27 @@ def _model_json(llm, prompt: str, stage: str, audit=None, progress=None,
                 require_proposal: bool = False, validator=None) -> dict[str, Any]:
     """Call one bounded stage; retry only that stage on truncation or connection loss."""
     last_error = "模型未返回 JSON 对象"
+    partial: dict[str, Any] = {}
+    retry_only: list[str] = []
     for attempt in range(2):
         request = prompt if attempt == 0 else (
             f"{prompt}\n\n上次输出失败：{last_error}。这是当前阶段的精简重试。"
-            "不要复述整体任务，不要输出其他阶段字段，不要输出思考过程或解释，只输出当前阶段 JSON。")
+            + (f"已经正确返回、可以直接沿用的部分：{json.dumps(partial, ensure_ascii=False)}。"
+               if partial else "")
+            + (f"本次只补齐这些根字段：{json.dumps(retry_only, ensure_ascii=False)}；"
+               f"根对象只能包含这些字段，严禁再次输出 {json.dumps(list(partial), ensure_ascii=False)}。"
+               if retry_only else "")
+            + "不要复述整体任务，不要输出其他阶段字段，不要输出思考过程或解释，只输出 JSON。")
         if audit:
             audit.write("blueprint_stage_request", stage=stage, attempt=attempt + 1,
                         prompt=request)
         try:
+            repair_rule = (f"本次是缺失字段定向补全，只能输出根字段：{retry_only}。"
+                           if attempt and retry_only else "")
             raw = llm.complete(request, system=(
                 f"你只负责故事蓝图的“{stage}”阶段。整体用户要求只决定内容，不能改变本阶段输出结构。"
-                "禁止提前输出其他阶段，禁止输出思考过程，只输出一个完整、精简的 JSON 对象。"),
+                + repair_rule
+                + "禁止提前输出其他阶段，禁止输出思考过程，只输出一个完整、精简的 JSON 对象。"),
                                temperature=0.3 if attempt == 0 else 0.1,
                                num_predict=budget,
                                disable_thinking=True)
@@ -437,11 +471,24 @@ def _model_json(llm, prompt: str, stage: str, audit=None, progress=None,
                         raw_response=raw)
         try:
             value = _normalize_stage_object(_complete_json_object(raw))
+            # Preserve valid sibling sections when a provider returns only part
+            # of a multi-section stage, so the retry can fill the missing part.
+            for key in (*required_text, *required_lists):
+                item = value.get(key)
+                if (key in required_lists and isinstance(item, list) and item) or (
+                        key in required_text and str(item or "").strip()):
+                    partial[key] = item
+            if partial:
+                value = {**partial, **value}
+                for key in required_lists:
+                    if not value.get(key) and partial.get(key):
+                        value[key] = partial[key]
             missing_text = [key for key in required_text
                             if not str(value.get(key) or "").strip()]
             missing_lists = [key for key in required_lists
                              if not isinstance(value.get(key), list) or not value.get(key)]
             if missing_text or missing_lists:
+                retry_only = missing_text + missing_lists
                 raise ValueError("缺少字段：" + "、".join(missing_text + missing_lists))
             if require_proposal and not isinstance(value.get("proposal"), dict):
                 raise ValueError("缺少 proposal 对象")
@@ -456,7 +503,9 @@ def _model_json(llm, prompt: str, stage: str, audit=None, progress=None,
 def _normalize_stage_object(value: dict[str, Any]) -> dict[str, Any]:
     """Accept a stage object or the same fields wrapped in a full blueprint."""
     result = dict(value)
-    known = {"premise", "destination", "ending_state", "phases", "arcs", "milestones",
+    known = {"theme_question", "theme_tension", "narrative_palette",
+             "premise", "destination", "ending_state",
+             "phases", "arcs", "milestones",
              "chapter_roadmap", "facts", "proposal", "proposals", "plan_fields", "replace",
              "chapter_updates"}
     # OpenAI-compatible models occasionally add one descriptive root key even
@@ -511,6 +560,10 @@ def _reference_map(rows: list[dict[str, Any]]) -> dict[str, str]:
 def _validate_structure_stage(value: dict[str, Any], phases: list[dict[str, Any]]) -> None:
     phase_refs = _reference_map(phases)
     arc_refs = _reference_map(value.get("arcs") or [])
+    primary_arcs = [row for row in value.get("arcs") or [] if isinstance(row, dict)
+                    and row.get("primary_eligible") is not False]
+    if len(primary_arcs) < 2:
+        raise ValueError("至少需要两条可独立承担表层剧情的人物或行动故事线")
     for row in value.get("milestones") or []:
         phase = str(row.get("phase_id") or "")
         if phase in phase_refs:
@@ -530,6 +583,8 @@ def _validate_roadmap_stage(value: dict[str, Any], phases: list[dict[str, Any]],
                             arcs: list[dict[str, Any]], expected_start: int | None = None,
                             locked_chapters: set[int] | None = None) -> None:
     phase_refs, arc_refs = _reference_map(phases), _reference_map(arcs)
+    primary_eligible = {str(row.get("id")) for row in arcs if isinstance(row, dict)
+                        and row.get("id") and row.get("primary_eligible") is not False}
     chapters = set()
     rows = value.get("chapter_roadmap") or []
     if not 6 <= len(rows) <= 10:
@@ -546,6 +601,8 @@ def _validate_roadmap_stage(value: dict[str, Any], phases: list[dict[str, Any]],
         primary = str(row.get("primary_arc") or "")
         if primary not in arc_refs:
             raise ValueError(f"第 {chapter} 章引用了不存在的故事线 {primary}")
+        if primary not in primary_eligible:
+            raise ValueError(f"第 {chapter} 章把背景主题线 {primary} 当成了表层主线")
         row["primary_arc"] = arc_refs[primary]
         normalized = []
         for arc in row.get("secondary_arcs") or []:
@@ -570,9 +627,16 @@ def _validate_roadmap_movement(rows: list[dict[str, Any]], locked_chapters: set[
     primary_arcs: set[str] = set()
     for row in rows:
         chapter = row.get("chapter")
-        if chapter in locked_chapters:
-            continue
         mode = str(row.get("event_mode") or "").strip().lower()
+        # Locked chapters still contribute to the narrative shape. Locking
+        # prevents rewriting; it must not make an existing consequence,
+        # subplot, or arc invisible to whole-route coverage checks.
+        if chapter in locked_chapters:
+            if mode in allowed:
+                modes.append(mode)
+            if row.get("primary_arc"):
+                primary_arcs.add(str(row["primary_arc"]))
+            continue
         if mode not in allowed:
             raise ValueError(f"第 {chapter} 章缺少有效 event_mode")
         if not str(row.get("visible_event") or "").strip():
@@ -582,11 +646,13 @@ def _validate_roadmap_movement(rows: list[dict[str, Any]], locked_chapters: set[
         modes.append(mode)
         if row.get("primary_arc"):
             primary_arcs.add(str(row["primary_arc"]))
-    missing = {"opposition", "consequence", "subplot"} - set(modes)
-    if missing:
-        raise ValueError("近期路线缺少必要叙事功能：" + "、".join(sorted(missing)))
-    if len(primary_arcs) < 3:
-        raise ValueError("近期路线至少需要实质推进三条不同故事线")
+    # Do not prescribe a fixed dramatic recipe. Requiring named modes made
+    # models relabel similar meetings as opposition/consequence/subplot while
+    # keeping the same reading experience. Require variety, not a checklist.
+    if len(set(modes)) < 3:
+        raise ValueError("近期路线的叙事方式过于单一，至少需要三种不同功能")
+    if len(primary_arcs) < 2:
+        raise ValueError("近期路线至少需要两条人物或行动故事线轮流成为主线")
     procedural = {"discovery", "institutional"}
     run = 0
     for mode in modes:
@@ -626,11 +692,17 @@ def _create_blueprint(context: dict[str, Any], requirements: str, guidance: str,
             "recent_chapter_summaries": (context.get("chapter_summaries") or [])[-12:],
             "current_story_state": context.get("current_story_state") or {},
         }
+    # Locked rows must survive a redesign, so their names cannot simultaneously
+    # be treated as forbidden similarities to the previous plan.
     avoid_design = {
-        "phase_names": [row.get("name") for row in old_plan.get("phases") or [] if row.get("name")],
-        "arc_names": [row.get("name") for row in old_plan.get("arcs") or [] if row.get("name")],
-        "milestone_names": [row.get("name") for row in old_plan.get("milestones") or [] if row.get("name")],
-        "roadmap_roles": [row.get("role") for row in old_plan.get("chapter_roadmap") or [] if row.get("role")],
+        "phase_names": [row.get("name") for row in old_plan.get("phases") or []
+                        if row.get("name") and not row.get("locked")],
+        "arc_names": [row.get("name") for row in old_plan.get("arcs") or []
+                      if row.get("name") and not row.get("locked")],
+        "milestone_names": [row.get("name") for row in old_plan.get("milestones") or []
+                            if row.get("name") and not row.get("locked")],
+        "roadmap_roles": [row.get("role") for row in old_plan.get("chapter_roadmap") or []
+                          if row.get("role") and not row.get("locked")],
     } if preserve_locked else {}
     if preserve_locked:
         goal = ("这是重新设计任务：旧蓝图中未锁定的阶段、故事线、里程碑和章节路线"
@@ -638,17 +710,20 @@ def _create_blueprint(context: dict[str, Any], requirements: str, guidance: str,
     if progress:
         progress("正在生成蓝图总体骨架（1/4）")
     skeleton = _model_json(llm, f"""{guidance}
-根据资料和用户目标设计长篇小说的总体骨架。只输出 premise、destination、ending_state、phases。
-phases 为 3—4 个全书阶段，每项包含 id,name,purpose,entry_state,exit_state,milestone_ids,status,locked；文字精简，不能把日期或单个线索当阶段。
+根据资料和用户目标设计长篇小说的总体骨架。输出 theme_question、theme_tension、narrative_palette、premise、destination、ending_state、phases。
+theme_question 是作品长期追问、没有标准答案的价值问题；theme_tension 是两种都具有合理性的价值拉力。它们只作为潜台词指南，不能写成角色必须讨论的口号、制度任务或每章都要直接表现的议题。
+narrative_palette 为 4—6 种可轮换的读者体验，每项包含 name,experience,suitable_characters,avoid；至少覆盖人物关系/日常、探索或神秘、行动或意外、安静情绪四类体验，不能全部是调查、会议或制度冲突。
+phases 为 3—4 个全书阶段，每项包含 id,name,purpose,entry_state,exit_state,milestone_ids,status,locked；阶段描述人物和局面的转变，不能把“分别展示若干群体的问题”设计成逐项打卡清单，也不能把日期或单个线索当阶段。
 高层资料：{json.dumps(skeleton_evidence, ensure_ascii=False)}
 必须保留的锁定约束：{json.dumps(locked, ensure_ascii=False)}
 用户目标：{goal}
 上一版设计特征（重新设计时应主动避开，锁定行除外）：{json.dumps(avoid_design, ensure_ascii=False)}
-【本轮输出边界】整体目标中即使要求完整蓝图，本轮也只完成总体骨架。根对象只能有 premise、destination、ending_state、phases 四个键；严禁输出 arcs、milestones、chapter_roadmap、facts 或 proposals。锁定约束中的 required_phase_ids 必须继续作为 phases 的 ID 出现，因为锁定里程碑仍引用它们；可以重新设计这些阶段的文字内容。
-输出 JSON：{{"premise":"","destination":"","ending_state":"","phases":[...]}}""",
+【本轮输出边界】整体目标中即使要求完整蓝图，本轮也只完成总体骨架。根对象只能有 theme_question、theme_tension、narrative_palette、premise、destination、ending_state、phases；严禁输出 arcs、milestones、chapter_roadmap、facts 或 proposals。锁定约束中的 required_phase_ids 必须继续作为 phases 的 ID 出现，因为锁定里程碑仍引用它们；可以重新设计这些阶段的文字内容。
+输出 JSON：{{"theme_question":"","theme_tension":"","narrative_palette":[...],"premise":"","destination":"","ending_state":"","phases":[...]}}""",
                            "总体骨架", audit, progress, 4200,
-                           required_text=("premise", "destination", "ending_state"),
-                           required_lists=("phases",),
+                           required_text=("theme_question", "theme_tension", "premise",
+                                          "destination", "ending_state"),
+                           required_lists=("narrative_palette", "phases"),
                            validator=(lambda value: _validate_regenerate_names(
                                value, "phases", avoid_design.get("phase_names") or []))
                            if preserve_locked else None)
@@ -658,8 +733,9 @@ phases 为 3—4 个全书阶段，每项包含 id,name,purpose,entry_state,exit
             skeleton.get("phases") or [])
     if progress:
         progress("正在设计故事线与关键里程碑（2/4）")
-    structure = _model_json(llm, f"""根据总体骨架设计 2—4 条故事线和 3—6 个里程碑。
-每条 arc 包含 id,name,kind,current_state,target_state,next_pressure,intersections,closure_condition,status,locked；每条 milestone 包含 id,name,purpose,arc_ids,phase_id,target_range,preconditions,payoff,status,locked。引用的 phase_id 必须来自骨架。
+    structure = _model_json(llm, f"""根据总体骨架设计 2—5 条故事线和 3—6 个里程碑。
+每条 arc 包含 id,name,kind,owner,desire,private_stake,surface_engine,primary_eligible,current_state,target_state,next_pressure,intersections,closure_condition,status,locked。人物或关系线必须有具体行动主体、私人欲望和即使离开中心议题也能独立发展的矛盾；抽象社会议题、世界状态或主题汇总线必须设 primary_eligible=false，只能作为背景或交汇线，不能逐章充当表层主线。
+每条 milestone 包含 id,name,purpose,arc_ids,phase_id,target_range,preconditions,turning_event,caused_by,new_possibility,payoff,status,locked。里程碑必须由人物选择或外部事件造成方向改变，不能是“分别展示所有群体”“收集若干记录”或按类别完成覆盖的清单。引用的 phase_id 必须来自骨架。
 骨架：{json.dumps(skeleton, ensure_ascii=False)}
 必须保留的锁定约束：{json.dumps(locked, ensure_ascii=False)}
 高层资料：{json.dumps(skeleton_evidence, ensure_ascii=False)}
@@ -692,9 +768,13 @@ phases 为 3—4 个全书阶段，每项包含 id,name,purpose,entry_state,exit
     # through the facts list.  Keep the creative route and evidence extraction
     # as independently bounded stages instead.
     recent_summaries = (context.get("chapter_summaries") or [])[-8:]
+    theme_compass = {
+        "question": skeleton.get("theme_question"),
+        "tension": skeleton.get("theme_tension"),
+        "usage": "只作为潜台词；不得要求角色直接讨论，不得让每章重复命题词汇",
+    }
     roadmap_design = {
-        "premise": skeleton.get("premise"),
-        "destination": skeleton.get("destination"),
+        "narrative_palette": skeleton.get("narrative_palette") or [],
         "phases": skeleton.get("phases") or [],
         "arcs": structure.get("arcs") or [],
         "milestones": structure.get("milestones") or [],
@@ -705,9 +785,12 @@ phases 为 3—4 个全书阶段，每项包含 id,name,purpose,entry_state,exit
     locked_roadmap_chapters = {int(row["chapter"]) for row in locked.get("chapter_roadmap", [])
                                if isinstance(row, dict) and type(row.get("chapter")) is int}
     near_term = _model_json(llm, f"""根据已经确定的总体设计，规划从第 {next_chapter} 章开始的临近 6—10 章，并给出一条候选蓝图说明。
-chapter_roadmap 每项包含 chapter,phase_id,role,primary_arc,secondary_arcs,event_mode,visible_event,required_change,irreversible_change,ending_state,must_not_repeat,status,locked。章节必须连续；phase_id 和故事线 ID 必须引用给定设计。proposal 包含 id,status=pending,reason,changes。
-event_mode 只能从 opposition（对手主动行动）、consequence（现实损失或后果）、subplot（主线之外的情节实质推进）、relationship、discovery、decision、institutional 中选择。整段路线必须至少各有一章 opposition、consequence、subplot；至少三条故事线轮流成为主线；discovery 与 institutional 合计不得连续超过两章。visible_event 必须是读者能直接看到的场景事件，irreversible_change 必须说明本章结束后什么再也回不到原状。
-不要把“继续核验、再查一次、整理清单、建立记录、缩小范围”本身当作章节核心。查证只能服务于冲突、选择、损失或行动；新增故事线必须在近期章节中真正发生事件。
+chapter_roadmap 每项包含 chapter,phase_id,role,primary_arc,secondary_arcs,event_mode,character_focus,character_desire,surface_story,scene_texture,visible_event,required_change,irreversible_change,ending_state,must_not_repeat,status,locked。scene_texture 包含 setting、interaction、tone、spectacle，用于确保相邻章节读感不同。章节必须连续；phase_id 和故事线 ID 必须引用给定设计。proposal 包含 id,status=pending,reason,changes。
+event_mode 只能从 opposition、consequence、subplot、relationship、discovery、decision、institutional 中选择；整段至少使用三种不同功能，至少两条 primary_eligible=true 的人物或行动故事线轮流成为主线。primary_eligible=false 的背景主题线只能作为 secondary_arcs。visible_event 是一种可调整的表层故事机会，不是未来分幕必须逐字执行的场景；required_change 只规定人物、关系或局面变化。
+主题罗盘只能潜藏在人物选择、关系、意象和行动后果中。不得要求角色直接讨论主题，不得让每章都围绕总体命题的名词展开，也不得把主题逐章拆成教学案例。先设计人物当下真正想做的事，再让深层主题自然产生回声。
+不要按地点、族群、制度类别逐章轮流展示问题，也不要为了覆盖总体设计而让每章成为一个议题案例。允许部分故事线暂时退到背景，让一个人物目标连续发展并产生意外分叉。至少两章的表层故事即使完全不提核心命题也能独立成立，并通过人物关系或后果与长期方向产生回声。
+相邻章节不得重复主要地点、人物组合、互动方式和冲突载体。整段最多两章以会议、听证、审查、表决、协商或文书程序为主要场景；按 narrative_palette 轮换读者体验，安排人物私生活、关系、探索、意外、幽默、静场或行动等不同质感。不要把“继续核验、再查一次、整理清单、建立记录、缩小范围”本身当作章节核心。
+主题罗盘：{json.dumps(theme_compass, ensure_ascii=False)}
 总体设计：{json.dumps(roadmap_design, ensure_ascii=False)}
 最近章节摘要：{json.dumps(recent_summaries, ensure_ascii=False)}
 当前故事状态：{json.dumps(context.get('current_story_state') or {}, ensure_ascii=False)}
@@ -759,7 +842,10 @@ facts 每项包含 id,statement,evidence_chapters,status,locked；未来计划�
             near_term.get("chapter_roadmap") or [])
     candidate = {
         "version": 1, "facts_through_chapter": context["latest_saved_chapter"],
-        "plan": {"premise": skeleton.get("premise"),
+        "plan": {"theme_question": skeleton.get("theme_question"),
+                 "theme_tension": skeleton.get("theme_tension"),
+                 "narrative_palette": skeleton.get("narrative_palette"),
+                 "premise": skeleton.get("premise"),
                  "destination": skeleton.get("destination"),
                  "ending_state": skeleton.get("ending_state"),
                  "phases": skeleton.get("phases"), "arcs": structure.get("arcs"),
@@ -833,32 +919,123 @@ def _adjust_blueprint(context: dict[str, Any], requirements: str, guidance: str,
     evidence = {"latest_saved_chapter": context["latest_saved_chapter"],
                 "chapter_summaries": context["chapter_summaries"],
                 "current_story_state": context["current_story_state"]}
-    if progress:
-        progress("正在生成蓝图增量调整")
     fast_closure = "[节奏模式：快速收束]" in (requirements or "")
+    route_intent = bool(re.search(
+        r"(?:第?\s*\d+\s*(?:[—–~～\-至到]\s*\d+)?\s*章)|章节|近期路线|章节路线|chapter",
+        requirements or "", flags=re.IGNORECASE))
+    full_structure_intent = bool(re.search(
+        r"整体(?:改写|重构|调整)|重新设计|长期(?:主轴|结构|蓝图)|完整蓝图|四个长期阶段",
+        requirements or ""))
+    staged_adjustment = (not fast_closure and route_intent
+                         and len((requirements or "").strip()) >= 600)
     fast_instruction = ""
     if fast_closure:
         fast_instruction = """
 【快速收束硬约束】replace 必须同时包含完整 phases、milestones、chapter_roadmap，三者必须使用一致的收束时间；不得只改近期章节而保留旧里程碑。locked=true 的行必须逐字段原样保留，其余阶段退出条件、里程碑 target_range 与 payoff 要同步前移。chapter_roadmap 每项除原字段外增加 investigation_state，只能为 collect、commit、confront、resolve、aftermath、next_arc。collect 最多两章；前三章必须进入 confront；第六章前必须出现 resolve，使当前案件形成明确责任结论或完成正面对抗；resolve 后至少安排一章 aftermath 或 next_arc。不得新增日期、文书、名单或旁证来延长搜集阶段。"""
-    patch = _model_json(llm, f"""{guidance}
+    common_instruction = f"""{guidance}
 根据用户要求调整已有蓝图。只返回需要改变的部分；未提及的内容由程序原样保留，禁止整份重写。
-局部修改章节时必须输出 chapter_updates，只列出发生改变的章节；程序会按 chapter 合并。replace 仅用于确实要完整替换 phases、arcs、milestones 或整段 chapter_roadmap 的情况。plan_fields 仅可含 premise、destination、ending_state；facts 仅在事实需要更新时输出完整替代集合。不得修改或删除 locked=true 的内容。
+局部修改章节时必须输出 chapter_updates，只列出发生改变的章节；程序会按 chapter 合并。replace 仅用于确实要完整替换 phases、arcs、milestones 或整段 chapter_roadmap 的情况。plan_fields 仅可含 theme_question、theme_tension、narrative_palette、premise、destination、ending_state；facts 仅在事实需要更新时输出完整替代集合。不得修改或删除 locked=true 的内容。
+theme_question 与 theme_tension 只描述长期潜台词，不得拆成逐章必须直接讨论的议题。调整近期路线时优先改变人物欲望、表层故事、主要地点、互动方式和情绪质感，避免只给同类会议、调查或协商更换 event_mode。
 proposal 必须包含 id,status=pending,reason,changes，并准确概括这次变更。
 {fast_instruction}
+所有布尔值必须使用 JSON 的 true/false，不能写成字符串。只输出合法 JSON，不要输出解释文字。
 当前蓝图：{json.dumps(current, ensure_ascii=False)}
 近期证据：{json.dumps(evidence, ensure_ascii=False)}
 用户要求：{requirements or '依据当前故事状态优化后续规划'}
-输出 JSON：{{"plan_fields":{{...可选}},"chapter_updates":[...可选],"replace":{{...可选}},"facts":[...可选],"proposal":{{...}}}}""",
-                        "增量调整", audit, progress, 6000, require_proposal=True,
-                        validator=(lambda value: _validate_fast_closure_patch(
-                            value, current, int(context["latest_saved_chapter"]) + 1))
-                        if fast_closure else None)
+输出 JSON：{{"plan_fields":{{...可选}},"chapter_updates":[...可选],"replace":{{...可选}},"facts":[...可选],"proposal":{{...}}}}"""
+    if staged_adjustment:
+        if progress:
+            progress("正在调整总体阶段（1/4）")
+        current_plan = current.get("plan") or {}
+        phase_patch = _model_json(llm, f"""{guidance}
+这是大型蓝图调整的第一阶段，只输出总体方向和故事阶段。
+根对象只可包含 plan_fields、phases、proposal；严禁输出 arcs、milestones、chapter_roadmap、chapter_updates 或 facts。
+plan_fields 仅可含 theme_question、theme_tension、narrative_palette、premise、destination、ending_state。phases 仅在需要改变阶段时输出完整替代集合。不得修改或删除 locked=true 的阶段。
+proposal 必须包含 id,status=pending,reason,changes；changes 最多 8 条简短说明。所有布尔值必须使用 JSON 的 true/false。只输出合法、精简的 JSON。
+当前总体方向：{json.dumps({key: current_plan.get(key) for key in ('theme_question', 'theme_tension', 'narrative_palette', 'premise', 'destination', 'ending_state')}, ensure_ascii=False)}
+当前故事阶段：{json.dumps(current_plan.get('phases') or [], ensure_ascii=False)}
+最近正文摘要：{json.dumps((evidence.get('chapter_summaries') or [])[-8:], ensure_ascii=False)}
+用户要求：{requirements}
+输出 JSON：{{"plan_fields":{{...可选}},"phases":[...可选],"proposal":{{...}}}}""",
+                                  "增量调整·总体阶段", audit, progress, 5000,
+                                  require_proposal=True,
+                                  required_lists=("phases",) if full_structure_intent else ())
+        effective_phases = phase_patch.get("phases") or current_plan.get("phases") or []
+        if progress:
+            progress("正在调整人物故事线（2/4）")
+        arc_patch = _model_json(llm, f"""{guidance}
+这是大型蓝图调整的第二阶段，只输出人物与行动故事线。
+根对象只能包含 arcs；严禁输出阶段、里程碑、章节路线、事实或提案。arcs 仅在需要改变时输出完整替代集合。每条应简洁，包含既有结构要求的字段，不得修改或删除 locked=true 的故事线。抽象主题不能冒充人物故事线。只输出合法 JSON。
+调整后的总体方向：{json.dumps(phase_patch.get('plan_fields') or {}, ensure_ascii=False)}
+调整后的阶段：{json.dumps(effective_phases, ensure_ascii=False)}
+当前故事线：{json.dumps(current_plan.get('arcs') or [], ensure_ascii=False)}
+用户要求：{requirements}
+输出 JSON：{{"arcs":[...可选]}}""",
+                                "增量调整·人物故事线", audit, progress, 5000,
+                                required_lists=("arcs",) if full_structure_intent else ())
+        effective_arcs = arc_patch.get("arcs") or current_plan.get("arcs") or []
+        if progress:
+            progress("正在调整关键里程碑（3/4）")
+        milestone_patch = _model_json(llm, f"""{guidance}
+这是大型蓝图调整的第三阶段，只输出关键里程碑。
+根对象只能包含 milestones；严禁输出阶段、故事线、章节路线、事实或提案。milestones 仅在需要改变时输出完整替代集合，必须引用给定阶段和故事线；每项保持精简，不得修改或删除 locked=true 的里程碑。只输出合法 JSON。
+阶段：{json.dumps(effective_phases, ensure_ascii=False)}
+故事线：{json.dumps(effective_arcs, ensure_ascii=False)}
+当前里程碑：{json.dumps(current_plan.get('milestones') or [], ensure_ascii=False)}
+用户要求：{requirements}
+输出 JSON：{{"milestones":[...可选]}}""",
+                                      "增量调整·关键里程碑", audit, progress, 5000,
+                                      required_lists=("milestones",) if full_structure_intent else ())
+        effective_milestones = (milestone_patch.get("milestones")
+                                or current_plan.get("milestones") or [])
+        if progress:
+            progress("正在重写近期章节路线（4/4）")
+        structure_brief = {
+            "plan_fields": phase_patch.get("plan_fields") or {},
+            "phases": effective_phases,
+            "arcs": effective_arcs,
+            "milestones": effective_milestones,
+        }
+        route_key = "chapter_roadmap" if full_structure_intent else "chapter_updates"
+        route_patch = _model_json(llm, f"""{guidance}
+这是大型蓝图调整的第四阶段，只输出近期章节路线。
+根对象只能包含 {route_key}；不得输出完整蓝图、总体字段、事实或提案。每项必须包含 chapter 和章节所需的完整字段。不得修改 locked=true 的章节。
+每个文字字段应简洁明确，避免复述用户要求或长篇解释。所有布尔值必须使用 JSON 的 true/false，不能写成字符串。只输出合法 JSON。
+当前章节路线：{json.dumps(current_plan.get('chapter_roadmap') or [], ensure_ascii=False)}
+调整后的结构：{json.dumps(structure_brief, ensure_ascii=False)}
+近期证据：{json.dumps(evidence, ensure_ascii=False)}
+用户要求：{requirements}
+输出 JSON：{{"{route_key}":[...]}}""",
+                                  "增量调整·章节路线", audit, progress, 10000,
+                                  required_lists=(route_key,))
+        replacement = {}
+        for key, value in (("phases", phase_patch.get("phases")),
+                           ("arcs", arc_patch.get("arcs")),
+                           ("milestones", milestone_patch.get("milestones"))):
+            if isinstance(value, list) and value:
+                replacement[key] = value
+        patch = {"plan_fields": phase_patch.get("plan_fields") or {},
+                 "replace": replacement,
+                 "proposal": phase_patch.get("proposal")}
+        if full_structure_intent:
+            patch["replace"]["chapter_roadmap"] = route_patch[route_key]
+        else:
+            patch["chapter_updates"] = route_patch[route_key]
+    else:
+        if progress:
+            progress("正在生成蓝图增量调整")
+        patch = _model_json(llm, common_instruction,
+                            "增量调整", audit, progress, 6000, require_proposal=True,
+                            validator=(lambda value: _validate_fast_closure_patch(
+                                value, current, int(context["latest_saved_chapter"]) + 1))
+                            if fast_closure else None)
     if progress:
         progress("正在合并并校验蓝图调整")
     candidate = deepcopy(current)
     changed = False
     for key, value in (patch.get("plan_fields") or {}).items():
-        if key in ("premise", "destination", "ending_state"):
+        if key in ("theme_question", "theme_tension", "narrative_palette",
+                   "premise", "destination", "ending_state"):
             candidate.setdefault("plan", {})[key] = value
             changed = True
     chapter_updates = patch.get("chapter_updates")
@@ -871,7 +1048,7 @@ proposal 必须包含 id,status=pending,reason,changes，并准确概括这次�
     for key, value in (patch.get("replace") or {}).items():
         if key in ("phases", "arcs", "milestones", "chapter_roadmap") and isinstance(value, list):
             _ensure_locked_rows(candidate.get("plan", {}).get(key) or [], value, key)
-            if key == "chapter_roadmap" and not fast_closure:
+            if key == "chapter_roadmap" and not fast_closure and not full_structure_intent:
                 value = _merge_partial_roadmap(
                     candidate.get("plan", {}).get("chapter_roadmap") or [], value)
             candidate.setdefault("plan", {})[key] = value
@@ -967,22 +1144,80 @@ def _complete_json_object(raw: str) -> dict[str, Any]:
     start = text.find("{")
     if start < 0:
         raise ValueError("模型未返回正式 JSON，只返回了思考过程或说明文字")
+    payload = text[start:]
     try:
-        value, _ = json.JSONDecoder().raw_decode(text[start:])
-    except json.JSONDecodeError:
-        raise ValueError("模型输出在根 JSON 闭合前被截断") from None
+        value, _ = json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError as exc:
+        near_end = exc.pos >= max(0, len(payload) - 24)
+        if near_end or exc.msg.startswith("Unterminated string"):
+            raise ValueError("模型输出在根 JSON 闭合前被截断") from None
+        raise ValueError(
+            f"模型返回的 JSON 格式损坏（位置 {exc.pos}）：{exc.msg}") from None
     if not isinstance(value, dict):
         raise ValueError("模型返回的根 JSON 不是对象")
     return value
 
 
-def blueprint_for_planning(project_dir: str) -> dict[str, Any]:
-    """Bounded source for chapter planning; omit proposal history."""
+def blueprint_for_planning(project_dir: str, chapter_number: int | None = None) -> dict[str, Any]:
+    """Return only the blueprint slice relevant to one chapter.
+
+    Feeding the complete premise, every phase, every milestone and every future
+    event into each chapter made themes surface as repeated dialogue and made
+    unlocked suggestions behave like a script. Facts remain authoritative;
+    unlocked route events remain visible as advisory creative references, while
+    the authority flag tells planning whether they may be replaced.
+    """
     blueprint = load_story_blueprint(project_dir)
+    plan = blueprint.get("plan") or {}
+    routes = [row for row in plan.get("chapter_roadmap") or [] if isinstance(row, dict)]
+    route = next((row for row in routes if row.get("chapter") == chapter_number), None)
+    phase_id = str((route or {}).get("phase_id") or "")
+    phase = next((row for row in plan.get("phases") or []
+                  if isinstance(row, dict) and str(row.get("id") or "") == phase_id), None)
+    arc_ids = {str((route or {}).get("primary_arc") or ""),
+               *(str(item) for item in (route or {}).get("secondary_arcs") or [])}
+    arc_ids.discard("")
+    arcs = [row for row in plan.get("arcs") or []
+            if isinstance(row, dict) and str(row.get("id") or "") in arc_ids]
+    milestones = [row for row in plan.get("milestones") or []
+                  if isinstance(row, dict) and (str(row.get("phase_id") or "") == phase_id
+                                                or arc_ids.intersection(
+                                                    str(item) for item in row.get("arc_ids") or []))]
+
+    def compact_route(row: dict[str, Any] | None) -> dict[str, Any]:
+        if not row:
+            return {}
+        locked = bool(row.get("locked"))
+        keys = ("chapter", "phase_id", "role", "primary_arc", "secondary_arcs",
+                "event_mode", "character_focus", "character_desire", "surface_story",
+                "scene_texture", "visible_event", "required_change",
+                "irreversible_change", "ending_state", "must_not_repeat",
+                "status", "locked")
+        result = {key: deepcopy(row.get(key)) for key in keys if key in row}
+        result["creative_reference"] = ("必须遵守；只能补充细节，不得替换核心场景"
+                                        if locked else
+                                        "可调整参考；优先继承其创意，可按正文需要改变表层事件、地点或互动方式")
+        return result
+
     return {
         "facts_through_chapter": blueprint.get("facts_through_chapter", 0),
         "facts": (blueprint.get("facts") or [])[-40:],
-        "plan": blueprint.get("plan") or {},
+        "theme_compass": {
+            "question": plan.get("theme_question") or "",
+            "tension": plan.get("theme_tension") or "",
+            "usage": "只作为潜台词；不要让角色直接复述，不是本章必须完成的任务",
+        },
+        "planning_scope": {
+            "chapter": chapter_number,
+            "phase": ({key: deepcopy(phase.get(key)) for key in
+                       ("id", "name", "entry_state", "exit_state", "status", "locked")
+                       if key in phase} if phase else {}),
+            "narrative_palette": deepcopy(plan.get("narrative_palette") or []),
+            "relevant_arcs": deepcopy(arcs),
+            "nearby_milestones": deepcopy(milestones[:2]),
+            "route": compact_route(route),
+            "route_authority": "binding" if (route or {}).get("locked") else "advisory",
+        },
     }
 
 
