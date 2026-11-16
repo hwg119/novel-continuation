@@ -729,11 +729,11 @@ def save_chapter(project_dir: str, chapter_number: int, title: str, body: str) -
     return path
 
 
-def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
-                     chapter_number: int = None, chapter_title: str = None,
-                     beats: list = None, chars_per_beat: int = None,
-                     temperature: float = None, embedding_cfg: dict = None,
-                     progress=None) -> dict:
+def generate_chapter_by_beats(project_dir: str, settings: dict, llm: ContinuationLLM,
+                              chapter_number: int = None, chapter_title: str = None,
+                              beats: list = None, chars_per_beat: int = None,
+                              temperature: float = None, embedding_cfg: dict = None,
+                              progress=None) -> dict:
     """逐幕生成一章，返回统计信息。
 
     ``embedding_cfg`` 若提供且 ``settings.get('retrieval_in_continuation')`` 为 True，
@@ -998,6 +998,172 @@ def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
     }
 
 
+def build_natural_chapter_prompt(settings: dict, beats: list[dict], style: str,
+                                 target_chars: int, previous_summaries: list | None = None,
+                                 previous_chapter_tail: str = "", retrieved_context: str = "",
+                                 wiki_context: str = "", audit=None) -> str:
+    """Build a whole-chapter writing brief where scenes are outcomes, not slots."""
+    from core.agent_skill import skill_guidance
+    guidance = skill_guidance("chapter-writing", audit=audit, stage="whole_chapter")
+    from_scratch = bool(settings.get("_regenerate_from_scratch"))
+    opportunities = "\n".join(
+        (f"- {beat.get('name', '')}（只保留这一高层方向，重新构思具体事件）"
+         if from_scratch else f"- {beat.get('name', '')}：{beat.get('desc', '')}")
+        for beat in beats if isinstance(beat, dict)
+    ) or "- 依据本章目标自然展开"
+    summaries = "\n".join(f"- 第{number}章：{summary}" for number, summary in (previous_summaries or []))
+    glossary = settings.get("glossary") or {}
+    glossary_text = "\n".join(
+        f"- {str(zh).strip()}" + (f"（{str(en).strip()}）" if str(en or "").strip() else "")
+        for zh, en in glossary.items() if str(zh or "").strip()
+    ) if isinstance(glossary, dict) else ""
+    forbidden = "、".join(str(item) for item in settings.get("forbidden_words") or [])
+    script_rule = "全文使用繁体字" if settings.get("traditional") else "全文使用简体字"
+    return f"""{guidance}
+
+【创作方式】
+把本章作为一篇连续小说来写，不按幕逐项交差，也不要输出幕名、场景标题或结构说明。先在心中找出人物此刻最强的欲望和一条贯穿全章的行动线，让事件、关系与情绪沿因果自然生长。
+
+{'这是一次从零重写。不得复原旧稿的场景编排；规划仅保留高层方向，具体地点、行动、参与人物、冲突载体与转折方式均须依据前章重新构思。' if from_scratch else ''}
+
+下列规划是故事机会，不是必须逐项覆盖的清单。可以合并、改换表层事件、调整顺序或舍弃重复内容；只需守住本章核心变化、既有事实和章末方向。不要为了“用上规划”而增加会议、核对、签字、转交、复述规则或无动机转场。
+
+若地点、任务或参与人物发生变化，正文中必须让读者自然感到触发原因：谁为什么此刻去那里，上一件事如何促成下一件事。无法自然成立的事件宁可不用。允许一场戏写到底，也允许在真正的时间、地点、视角或主要关系发生变化时自然转场。
+
+【本书背景】
+{settings.get('background', '') or '(未填写)'}
+
+【本章回目】
+{settings.get('chapter_title', '') or '(未填写)'}
+
+【本章核心目标】
+{settings.get('chapter_brief', '') or '(依据上下文自然推进)'}
+{planning_input_prompt(settings)}
+
+【规划中的故事机会】
+{opportunities}
+
+【最近章节摘要】
+{summaries or '(未提供)'}
+
+【上一章正文结尾】
+{previous_chapter_tail.strip()[-2400:] or '(未提供)'}
+
+【连续性证据】
+{wiki_context[:2400] or '(未提供)'}
+
+【母本参考】
+{retrieved_context[:1800] or '(未提供)'}
+
+【语体样本】
+{style or '(未提供)'}
+
+【固定译名】
+{glossary_text or '(无)'}
+
+【写作要求】
+- 目标约 {target_chars} 个中文字符；篇幅服务故事，不为凑字重复解释。
+- {script_rule}，直接输出完整小说正文，不输出标题、Markdown、提纲、分析或修改说明。
+- 让人物通过行动、误解、迟疑、关系压力和选择显出情感，不由旁白解释所有意义。
+- 章末应形成真实的新局面或阅读牵引，但不必机械总结。
+- 人物口吻：{settings.get('character_voices', '').strip() or '沿用上下文中的人物声音'}。
+{('作者禁用词句：' + forbidden) if forbidden else ''}
+{settings.get('extra_requirements', '').strip()}
+"""
+
+
+def generate_chapter_naturally(project_dir: str, settings: dict, llm: ContinuationLLM,
+                               chapter_number: int = None, chapter_title: str = None,
+                               beats: list = None, chars_per_beat: int = None,
+                               temperature: float = None, embedding_cfg: dict = None,
+                               progress=None) -> dict:
+    """Generate a chapter as one continuous narrative; scenes remain implicit."""
+    beats = beats or settings.get("beats") or []
+    if not beats:
+        raise ValueError("没有章节规划。请先填写章节目标或生成规划。")
+    chars_per_beat = int(chars_per_beat or settings.get("chars_per_beat", 600))
+    chapter_number = int(chapter_number or settings.get("chapter_number", 101))
+    chapter_title = chapter_title or settings.get("chapter_title", "") or f"第{chapter_number}章"
+    target_chars = max(1200, min(12000, chars_per_beat * max(1, len(beats))))
+
+    from core.run_log import GenerationRunLogger
+    run_log = GenerationRunLogger(project_dir, chapter_number)
+    run_log.write("run_started", chapter_number=chapter_number, chapter_title=chapter_title,
+                  model=getattr(llm, "cfg", {}).get("model_name", ""),
+                  temperature=temperature, generation_mode="natural_chapter")
+    local_settings = dict(settings)
+    local_settings["chapter_title"] = chapter_title
+    style = read_style_sample(project_dir, settings)
+
+    previous = _scan_existing_summaries(project_dir, chapter_number) if settings.get("use_previous_summaries", True) else []
+    previous_chapter_tail = ""
+    if chapter_number > 1:
+        previous_path = chapter_path(project_dir, chapter_number - 1)
+        if os.path.isfile(previous_path):
+            previous_chapter_tail = read_file(previous_path)[-2400:]
+
+    query = " ".join(filter(None, [chapter_title, str(settings.get("chapter_brief") or ""),
+                                     " ".join(str(beat.get("name") or "") for beat in beats)]))
+    retrieved, retrieval_details = "", {}
+    if settings.get("retrieval_in_continuation", False) and embedding_cfg:
+        retrieved, retrieval_details = retrieve_context_for_beat(
+            project_dir, embedding_cfg, query, int(settings.get("retrieval_k_for_continuation", 3) or 3),
+            glossary=settings.get("glossary") or {}, source_query=query,
+            corpus_is_english=bool(settings.get("corpus_is_english", False)),
+            glossary_hard_terms=settings.get("glossary_hard_terms") or [], return_details=True)
+        run_log.write("retrieval_completed", scope="whole_chapter", **retrieval_details)
+
+    from core.auto_wiki import wiki_context as load_wiki_context
+    wiki, wiki_details = load_wiki_context(project_dir, query, before_chapter=chapter_number, return_details=True)
+    run_log.write("wiki_context", scope="whole_chapter", context=wiki, **wiki_details)
+    prompt = build_natural_chapter_prompt(
+        local_settings, beats, style, target_chars, previous[-3:], previous_chapter_tail,
+        retrieved, wiki, audit=run_log)
+    if progress:
+        progress("chapter_start", {"chapter": chapter_number, "target_chars": target_chars})
+    run_log.write("chapter_model_request", prompt=prompt, disable_thinking=True)
+    raw = llm.complete(prompt, system=local_settings.get("system_prompt", ""),
+                       temperature=temperature, num_predict=int(target_chars * 2.5),
+                       disable_thinking=True)
+    run_log.write("chapter_model_response", raw_response=raw,
+                  response_diagnostics=getattr(llm, "last_response_diagnostics", {}))
+    cleaned, dropped = dedupe(paragraphs(clean_text(raw, local_settings)))
+    body = "\n\n".join(cleaned).strip()
+    min_chars = max(400, min(1600, target_chars // 4))
+    if len(body) < min_chars:
+        error = f"整章输出过短（{len(body)} 字符，最低需要 {min_chars} 字符）"
+        run_log.write("run_failed", error=error)
+        raise ValueError(error)
+    path = save_chapter(project_dir, chapter_number, chapter_title, body)
+    summary = ""
+    if settings.get("use_previous_summaries", True):
+        summary = generate_chapter_summary(llm, body, int(settings.get("summary_chars", DEFAULT_SUMMARY_CHARS) or DEFAULT_SUMMARY_CHARS))
+        if summary:
+            write_chapter_summary(project_dir, chapter_number, summary)
+    section = {"beat_index": 1, "num": "", "name": "完整章节", "desc": "连续叙事正文",
+               "text": body, "issues": [], "status": "passed", "section_kind": "chapter"}
+    run_log.write("run_completed", chars=len(body), generation_mode="natural_chapter",
+                  dropped_duplicates=dropped, summary_chars=len(summary))
+    if progress:
+        progress("chapter_done", {"chapter": chapter_number, "chars": len(body)})
+    return {"chapter_number": chapter_number, "chapter_title": chapter_title, "path": path,
+            "text": body, "chars": len(body), "dropped_duplicates": dropped,
+            "retrieved_chars": len(retrieved), "summary": summary, "beat_drafts": [section],
+            "generation_mode": "natural_chapter"}
+
+
+def generate_chapter(project_dir: str, settings: dict, llm: ContinuationLLM,
+                     chapter_number: int = None, chapter_title: str = None,
+                     beats: list = None, chars_per_beat: int = None,
+                     temperature: float = None, embedding_cfg: dict = None,
+                     progress=None) -> dict:
+    """Generate naturally by default; retain the legacy beat loop as fallback."""
+    mode = str(settings.get("chapter_generation_mode") or "natural_chapter").strip().lower()
+    generator = generate_chapter_by_beats if mode in {"beats", "legacy_beats", "by_beats"} else generate_chapter_naturally
+    return generator(project_dir, settings, llm, chapter_number, chapter_title, beats,
+                     chars_per_beat, temperature, embedding_cfg, progress)
+
+
 def suggest_beats(settings: dict, llm: ContinuationLLM, num_beats: int = 6) -> list:
     """让模型根据背景与回目给出分幕大纲，返回 [{num,name,desc}]。"""
     prompt = f"""请为下面这一章续写内容设计 {num_beats} 幕的分幕大纲。
@@ -1043,7 +1209,13 @@ def _request_plan_json(llm: ContinuationLLM, prompt: str, num_beats: int,
     """请求并解析一份章节规划；这里只处理传输格式，不替代剧情审查。"""
     last_error = "模型未返回章节规划 JSON"
     from core.agent_skill import skill_guidance
-    reference = "draft" if stage == "draft" else "repair"
+    # A synopsis rewrite still rebuilds a complete plan from scene sources; it
+    # is not a field-level JSON repair.  Feeding the repair reference here made
+    # some providers mirror the intermediate ``scenes/index/time_anchor``
+    # schema instead of returning the canonical ChapterPlan shape.
+    reference = ("draft" if stage in {
+        "draft", "rewrite", "acceptance_rewrite",
+    } else "repair")
     prompt = skill_guidance("chapter-planning", reference, audit, stage) + "\n\n" + prompt
     if reference == "repair" and audit:
         audit.write("repair_evidence_policy", stage=stage,
@@ -1327,12 +1499,12 @@ def _request_chapter_synopsis(settings: dict, llm: ContinuationLLM, strategy: di
                               revision_feedback: str = "") -> str:
     """Expand a strategy into continuous story movement before any beat schema exists."""
     contract = {
-        "hard_constraints": list(strategy.get("hard_constraints") or [])[:8],
+        "hard_constraints": list(strategy.get("hard_constraints") or [])[:5],
         "desired_outcome": (str(strategy.get("desired_outcome") or "").strip()
                             or str(strategy.get("ending_change") or "").strip()
                             or str(strategy.get("primary_change") or "").strip()),
-        "preferences": list(strategy.get("preferences") or [])[:4],
-        "examples": list(strategy.get("examples") or [])[:3],
+        "preferences": list(strategy.get("preferences") or [])[:2],
+        "examples": list(strategy.get("examples") or [])[:1],
     }
     narrative_direction = {
         key: strategy.get(key) for key in
@@ -1362,6 +1534,7 @@ def _request_chapter_synopsis(settings: dict, llm: ContinuationLLM, strategy: di
 使用“【场景】”作为自然场景分隔符，不编号、不写幕名、不输出 JSON。每个场景块写连续叙事；{scene_count_rule}
 先写人物进入本章时真正想做什么，让阻力来自人物立场、现实限制或行动后果；让一个动作自然引出下一个动作。至少有一次关键选择通过人物言行实际发生，并让代价在后续反应中可见。安静过渡可以只负责情绪、关系或时空连接，不必制造危机。
 把属于同一地点、同一主要冲突和同一决定过程的内容写成一场连续戏，不要把“提出决定、确认决定、签署决定”拆成三场。配角要影响处置时，优先让其拒绝背书、撤回支持、提出不同选择或迫使主角承担关系后果；不要为了给配角制造作用而临时增加重复抄件、编号错误、保管差错、新证据或神秘物件。主题只作为潜台词，不让人物宣讲规则或总结道理。
+任何新任务、新地点或临时参与者都必须从前文已经发生的事情中获得直接动机；若找不到“为什么现在去那里做这件事”，就舍弃该安排，不能靠任务单、批准书或一段补叙强行建立联系。
 根据本章内容自由选择表现重心；不同场景可以依靠对话、行动、关系摩擦、气氛、幽默、魔法体验或内心变化成立，不要求每场同时具备固定元素。不要按用户要求的条目数分场，多项要求可以在同一场戏中交织完成。同一观察、调查或关系过程中的多次短暂现象，可以在一场连续戏或简短蒙太奇中完成；“不同时间、地点或感官”不自动构成多个场景。若两段内容采用相同的“发现—制止—记录—离开”反应链，应重组人物选择，而不是仅更换异常外观。
 hard_constraints 只控制事实边界与禁区；desired_outcome 只规定故事最终抵达哪里，不规定中间步骤。preferences 可自由取舍组合，examples 不能逐项覆盖。先让人物行动形成一条连续因果，再确认结果自然抵达，不要反过来为清单逐条配戏。
 整章只选择一条最有张力的持续行动线作为现场核心；输入中若仍出现“第一次、第二次、中止、复看、随后”等阶段描述，只把它们理解为可能素材或前后状态，不得逐项演出。一个核心选择及其直接后果足以完成章节，不为展示所有过程另起复核、汇总、备案或私人记录场景。
@@ -1796,10 +1969,11 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
             chapter_synopsis, scene_blocks = rewritten_synopsis, rewritten_scenes
             num_beats, prompt, data = rewritten_count, rewritten_prompt, rewritten_data
         except ValueError as exc:
-            if stage_runner:
-                raise
             if progress:
                 progress(f"提醒：定向重写未通过结构检查，保留可用初稿：{exc}")
+            if audit:
+                audit.write("synopsis_rewrite_rejected", error=str(exc),
+                            fallback="valid_draft")
             data = draft
     elif progress:
         progress("初审未发现证据充分的剧情问题，保留初稿；低风险提醒见完整日志")
@@ -1912,12 +2086,11 @@ def suggest_chapter_plan(settings: dict, llm: ContinuationLLM, num_beats: int,
                     if progress:
                         progress("验收回退后的最终复核通过")
             except ValueError as exc:
-                if stage_runner:
-                    raise
                 if progress:
                     progress(f"提醒：验收回退未通过结构检查，保留前一版重写稿：{exc}")
                 if audit:
-                    audit.write("acceptance_synopsis_rewrite_rejected", error=str(exc))
+                    audit.write("acceptance_synopsis_rewrite_rejected", error=str(exc),
+                                fallback="previous_valid_candidate")
         else:
             validation_status = "passed"
             if progress:

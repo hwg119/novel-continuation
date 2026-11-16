@@ -31,6 +31,7 @@ DEFAULT_PROJECT_SETTINGS = {
     "chapter_title": "",
     "chars_per_beat": 600,
     "beats_per_chapter": 10,
+    "chapter_generation_mode": "natural_chapter",
     "temperature": 0.8,
     "llm_config_name": "",
     "system_prompt": (

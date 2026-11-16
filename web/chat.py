@@ -272,6 +272,7 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                     action_id = store.action(ident, {**baseline_data, 'tool': tool, 'chapter': number,
                         'requirements': requirements, 'model_name': payload.model_name,
                         'revision_scope': (decision.get('revision_scope') or 'local') if tool == 'plan_revision' else 'local',
+                        'generation_mode': (decision.get('generation_mode') or 'new') if tool == 'generate' else 'new',
                         'blueprint_mode': (decision.get('blueprint_mode') or 'create') if tool == 'blueprint' else None,
                         'original_user_request': payload.text.strip(),
                         'source_request_turn':decision.get('source_request_turn'),
@@ -282,7 +283,9 @@ def register_chat(app, workspace, project_path, llm_config, tools, jobs, write_r
                         'message': ('按你的原始要求重新构建回目和分幕，生成候选后由你保存。'
                                     if tool == 'plan' else '按你的要求修订；基准：' + baseline_data['plan_baseline']['label']
                                     if tool == 'plan_revision' else '按你的要求修订正文；基准：' + baseline_data['work_object']['title']
-                                    if tool == 'revise' else str(decision.get('message') or '确认后执行')),
+                                    if tool == 'revise' else '将保留旧正文快照，并从前章与当前规划重新创作本章，不使用旧正文作为底稿。'
+                                    if tool == 'generate' and decision.get('generation_mode') == 'regenerate'
+                                    else str(decision.get('message') or '确认后执行')),
                         'turn_id': turn, 'auto_execute': True})
                     # A tool proposal is already the dialogue agent's structured
                     # interpretation of an explicit user operation. Start it now;

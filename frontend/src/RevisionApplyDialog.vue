@@ -17,6 +17,14 @@ const rows = computed(() => preview.value ? compareChapters(preview.value.curren
 const visible = computed(() => visibleDiffRows(rows.value,showAll.value))
 const changes = computed(() => rows.value.filter(row => row.kind !== 'same').length)
 const allowed = computed(() => preview.value && !preview.value.outdated && !preview.value.applied && !preview.value.blocking_issues.length && (!preview.value.warnings.length || warningsConfirmed.value) && !error.value)
+const applyHint = computed(() => {
+  if (!preview.value) return ''
+  if (preview.value.applied) return '此修订稿已经应用。'
+  if (preview.value.outdated) return '当前正文已经变化，不能覆盖。'
+  if (preview.value.blocking_issues.length) return `尚不能应用：${preview.value.blocking_issues.join('；')}`
+  if (preview.value.warnings.length && !warningsConfirmed.value) return '请先勾选上方确认项。'
+  return '确认后自动备份并保存正文，无需再点保存。'
+})
 async function save() {
   if (!allowed.value || saving.value || !preview.value) return
   saving.value = true
@@ -44,10 +52,10 @@ onMounted(async () => {
       <template v-for="(row,index) in visible" :key="index"><div v-if="row.kind === 'collapsed'" class="revision-collapsed">已收起 {{ row.count }} 段未改动内容 <button @click="showAll = true">展开</button></div><template v-else><div class="revision-cell" :class="row.kind"><span v-for="(part,i) in row.beforeParts" :key="i" :class="{'diff-removed':part.changed}">{{ part.text }}</span></div><div class="revision-cell" :class="row.kind"><span v-for="(part,i) in row.afterParts" :key="i" :class="{'diff-added':part.changed}">{{ part.text }}</span></div></template></template>
     </div></div>
   </template>
-  <template #footer><span class="revision-dialog-note">确认后自动备份并保存正文，无需再点保存。</span><button class="dialog-secondary" :disabled="saving" @click="emit('close')">取消</button><button class="dialog-primary" :disabled="!allowed || saving" @click="save">{{ saving ? '正在保存…' : '应用并保存正文' }}</button></template>
+  <template #footer><span class="revision-dialog-note" :class="{'is-blocked':!allowed}">{{ applyHint }}</span><button class="dialog-secondary" :disabled="saving" @click="emit('close')">取消</button><button class="dialog-primary" :disabled="!allowed || saving" @click="save">{{ saving ? '正在保存…' : '应用并保存正文' }}</button></template>
 </ElDialog></template>
 
 <style>
 .revision-model-warnings{margin-bottom:14px;padding:12px 16px;border:1px solid #decbb2;border-radius:6px;background:#fff4e9;color:#8b603d;line-height:1.75}.revision-model-warnings ul{padding-left:20px}.revision-model-warnings .check{color:#587069}.revision-model-warnings input{accent-color:#326b59}
-.chat-revision-dialog{border:1px solid #cbdad2;border-radius:8px;background:#fbfdfb;--el-color-primary:#326b59;--el-text-color-primary:#183f3a;--el-text-color-regular:#587069}.chat-revision-dialog .el-dialog__title{font:600 24px/1.3 "KaiTi","STKaiti",serif;color:#183f3a}.chat-revision-dialog .el-dialog__footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;border-top:1px solid #e0e9e4;padding-top:14px}.revision-dialog-intro{margin-top:0;color:#587069}.revision-dialog-scroll{max-height:55vh;overflow:auto;overscroll-behavior:contain;margin-top:14px}.revision-dialog-note{margin-right:auto;font-size:12px;color:#698585}.chat-revision-dialog .dialog-primary,.chat-revision-dialog .dialog-secondary{border:1px solid #cbdad2;border-radius:6px;padding:10px 16px;font:inherit;background:#edf4ef;color:#356b59}.chat-revision-dialog .dialog-primary{background:#326b59;border-color:#326b59;color:#fff}.chat-revision-dialog button:disabled{opacity:.45;cursor:not-allowed}.chat-revision-dialog button:focus-visible{outline:2px solid #79a998;outline-offset:2px}
+.chat-revision-dialog{border:1px solid #cbdad2;border-radius:8px;background:#fbfdfb;--el-color-primary:#326b59;--el-text-color-primary:#183f3a;--el-text-color-regular:#587069}.chat-revision-dialog .el-dialog__title{font:600 24px/1.3 "KaiTi","STKaiti",serif;color:#183f3a}.chat-revision-dialog .el-dialog__footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;border-top:1px solid #e0e9e4;padding-top:14px}.revision-dialog-intro{margin-top:0;color:#587069}.revision-dialog-scroll{max-height:55vh;overflow:auto;overscroll-behavior:contain;margin-top:14px}.revision-dialog-note{margin-right:auto;font-size:12px;color:#698585}.revision-dialog-note.is-blocked{color:#a14b2d}.chat-revision-dialog .dialog-primary,.chat-revision-dialog .dialog-secondary{border:1px solid #cbdad2;border-radius:6px;padding:10px 16px;font:inherit;background:#edf4ef;color:#356b59}.chat-revision-dialog .dialog-primary{background:#326b59;border-color:#326b59;color:#fff}.chat-revision-dialog button:disabled{opacity:.45;cursor:not-allowed}.chat-revision-dialog button:focus-visible{outline:2px solid #79a998;outline-offset:2px}
 </style>

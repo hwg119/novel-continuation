@@ -240,7 +240,8 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
                 "vector_job_id": vector_job.get("id") if vector_job else None}
 
     def revision_preview(project_id, job_id):
-        from core.chapter_revision import chapter_body, check_chapter_candidate
+        from core.chapter_revision import (chapter_body, chapter_candidate_advisories,
+                                           check_chapter_candidate)
         project = project_path(project_id)
         job = jobs.get(project,job_id)
         if not job or job.get('kind') != 'revise' or job.get('status') != 'completed': raise HTTPException(404,'修订稿不存在或尚未完成')
@@ -255,6 +256,9 @@ def create_app(workspace_root: str, frontend_dist: str | None = None,
         source = str(result.get('original_source', result.get('source')) or '').strip()
         settings = settings_for_chapter(load_project_settings(project),number)
         warnings = list(result.get('issues') or [])
+        warnings.extend(chapter_candidate_advisories(
+            candidate, source, str(result.get('requirements') or ''), settings))
+        warnings = list(dict.fromkeys(warnings))
         blocking_issues = check_chapter_candidate(candidate,source,str(result.get('requirements') or ''),settings)
         return {'job_id':job_id,'chapter':number,'title':title,'source':source,'current':body,
                 'candidate':candidate,'revision':_revision(current),'issues':list(dict.fromkeys(warnings + blocking_issues)),

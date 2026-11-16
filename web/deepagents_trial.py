@@ -2,6 +2,7 @@
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -15,6 +16,16 @@ from web.chat_research import ChatResearch, RESEARCH_GUIDANCE
 from web.chat_skills import skill_catalog, read_dialogue_skill
 from web.chat_memory import compact_dialogue_context, read_conversation_turn
 from tools.deepagents.reply_contract import unfulfilled_action_promise
+
+
+def full_chapter_regeneration_requested(text: str) -> bool:
+    """Recognize an explicit request to replace, rather than revise, a chapter."""
+    value = str(text or "")
+    if re.search(r'(?:局部|部分|某段|保留原稿)', value):
+        return False
+    return bool(re.search(
+        r'(?:完全重新|从零(?:重写|创作|生成)|推倒重写|不沿用旧稿|整章重新(?:写|创作|生成)|重写第?\s*\d+\s*章)',
+        value, re.I))
 
 
 def run_trial(config,context,text,guide,backend,emit,running,command=None):
@@ -111,6 +122,18 @@ def run_trial(config,context,text,guide,backend,emit,running,command=None):
                                   'revision_scope':args.get('revision_scope') or 'regenerate'}
                             audit.write('tool_route_corrected',from_tool='plan',
                                         to_tool=tool,reason='selected_plan_target')
+                        full_regeneration = full_chapter_regeneration_requested(text)
+                        if tool == 'revise' and full_regeneration:
+                            tool = 'generate'
+                            args = {**args, 'tool': tool, 'generation_mode': 'regenerate',
+                                    'target_artifact_id': None}
+                            audit.write('tool_route_corrected', from_tool='revise',
+                                        to_tool=tool, reason='explicit_full_chapter_regeneration')
+                        generation_mode = args.get('generation_mode') or 'new'
+                        if generation_mode not in {'new', 'regenerate'}:
+                            raise ValueError('正文生成模式无效')
+                        if tool != 'generate':
+                            args = {**args, 'generation_mode': 'new'}
                         scope = args.get('revision_scope') or 'local'
                         if scope not in {'local','structural','regenerate'}:
                             raise ValueError('分幕修订范围无效')

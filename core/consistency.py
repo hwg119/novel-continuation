@@ -157,7 +157,7 @@ def verify_audit_issue(candidate, sources):
     item["evidence_verified"] = bool(item.get("problem") and suggestion and len(suggestion) <= 120
         and item.get("evidence_state") == "confirmed" and has_current
         and located and all(c["verified"] for c in located)
-        and ((item.get("kind") == "conflict" and count >= 2) or
+        and ((item.get("kind") in {"conflict", "continuity_gap"} and count >= 2) or
              (item.get("kind") == "text_error" and count >= 1)))
     item["evidence_status"] = "已定位，语义互斥判断由模型负责" if item["evidence_verified"] else "引文或确定性不足，不自动修订"
     return item

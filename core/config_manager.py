@@ -88,6 +88,7 @@ DEFAULT_CONFIG = {
         "chars_per_beat": 600,
         "temperature": 0.8,
         "beats_per_chapter": 10,
+        "chapter_generation_mode": "natural_chapter",
     },
 }
 

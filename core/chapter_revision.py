@@ -23,8 +23,11 @@ def build_whole_chapter_prompt(source: str, title: str, settings: dict,
     if audit:
         audit.write("skill_loaded", stage="revision_generation", **skill)
     beats = settings.get("beats") or []
+    # The saved plan is historical orientation, not a second mandatory brief.
+    # Full beat descriptions can contain superseded staging instructions and
+    # make a structural rewrite reproduce the very machinery being removed.
     outline = "\n".join(
-        f"{i}. 第{beat.get('num', i)}幕 {beat.get('name', '')}：{beat.get('desc', '')}"
+        f"{i}. 第{beat.get('num', i)}幕 {beat.get('name', '')}"
         for i, beat in enumerate(beats, 1)
     )
     return f"""{guidance}
@@ -35,11 +38,17 @@ def build_whole_chapter_prompt(source: str, title: str, settings: dict,
 {settings.get('extra_requirements', '')}
 {settings.get('chapter_requirements', '')}
 
-【分幕大纲】
+【原分幕索引｜只供定位，可按本次要求重组】
 {outline}
 
-【本次修订要求｜仅执行这些要求】
+【本次修订编辑意见】
 {requirements}
+
+先在心中把编辑意见归纳为“一条核心变化、少量不可违背事实、其余可选实现”，不要输出归纳过程。具体地点、分组、道具、声音、步骤和台词若只是建议或举例，可以舍弃、合并或换成更自然的写法。不要用人物逐条复述限制来证明已经遵守要求。
+
+场景转换必须有可感知的触发：人物为什么去下一个地点、为何开始这项行动、谁允许或促成它。若编辑意见建议的事件缺少前文动机，补入最短而自然的起因，或换用能够承接前文的事件；不要只加一段规则说明。
+
+以一条连续因果和人物当下欲望组织全章。规则只守边界，正文应像小说自然发生；允许留白、意外、关系摩擦和不完全受控的反应，不把验收条件逐项写成剧情。
 
 【当前完整正文】
 {source}
@@ -125,19 +134,28 @@ def _revision_source(text: str, requirements: str, rebuild: bool) -> str:
 
 
 def explicit_checks(requirements: str) -> tuple[list[str], list[str]]:
-    """仅抽取明确的字面要求。其余语义要求仍需人工审阅。"""
+    """仅抽取能够安全按全文执行的字面要求。
+
+    ``校园段不得出现哈利`` 这类约束有明确局部作用域，不能降格成
+    “全文禁用哈利”，尤其当同一要求又明确保留含该人物的前半段时。
+    局部、条件式和叙事语义约束由模型验收处理；这里只保留独立禁令及
+    明写“全文/整章/全篇”的禁令，供确定性的最终应用检查使用。
+    """
     required, forbidden = [], []
     for line in (requirements or "").splitlines():
         line = line.strip().lstrip("-• ")
+        line = re.sub(r"^\d+\s*[.、)]\s*", "", line)
         for match in re.finditer(r"(?:使用|必须包含|必须出现)\s*[“\"「]([^”\"」]+)[”\"」]", line):
             required.append(match.group(1).strip())
         match = re.search(r"(?:不得出现|禁止出现|不得写出)\s*([^；。;]+)", line)
-        if match:
+        prefix = line[:match.start()].strip() if match else ""
+        global_scope = (not prefix or bool(re.search(
+            r"(?:全文|整章|全篇|任何位置|任何地方|通篇)\s*(?:中|内|都|均)?\s*$", prefix)))
+        if match and global_scope:
             forbidden.extend(
                 item.strip().strip("“”\"「」 ")
                 for item in re.split(r"[、,，]", match.group(1))
             )
-        forbidden.extend(re.findall(r"不是\s*[“\"「]?([^，、；。\s”\"」]+)", line))
     return list(dict.fromkeys(x for x in required if x)), list(dict.fromkeys(x for x in forbidden if x))
 
 
@@ -163,22 +181,33 @@ def _project_term_issues(text: str, settings: dict | None) -> list[str]:
 
 def check_chapter_candidate(text: str, source: str, requirements: str,
                             settings: dict | None = None) -> list[str]:
-    """筛掉明显未完成或触犯字面约束的建议。"""
+    """只拦截无法安全保存为正文的技术性失败。"""
     candidate = (text or "").strip()
     issues = []
     if not candidate:
         return ["模型未返回正文"]
     if (requirements or "").strip() and candidate == (source or "").strip():
         issues.append("修订稿与原正文完全相同，用户要求尚未实际落实")
-    if len(candidate) < len((source or "").strip()) * 0.65:
-        issues.append("修订稿不足原文字数的 65%，可能遗漏了部分幕")
-    required, forbidden = explicit_checks(requirements)
-    issues.extend(f"缺少必含词：{term}" for term in required if term not in candidate)
-    issues.extend(f"仍含禁词：{term}" for term in forbidden if term in candidate)
     if re.search(r"(?m)^\s*(?:修改说明|自检报告|修订说明)[:：]", candidate):
         issues.append("模型输出了修订说明而非纯正文")
-    issues.extend(_project_term_issues(candidate, settings))
     return issues
+
+
+def chapter_candidate_advisories(text: str, source: str, requirements: str,
+                                 settings: dict | None = None) -> list[str]:
+    """返回值得用户核对、但不应代替用户否决候选稿的机械提醒。"""
+    candidate = (text or "").strip()
+    if not candidate:
+        return []
+    notes = []
+    if len(candidate) < len((source or "").strip()) * 0.65:
+        notes.append("修订稿不足原文字数的 65%，请确认删减属于预期")
+    required, forbidden = explicit_checks(requirements)
+    notes.extend(f"未检出要求字样：{term}" for term in required if term not in candidate)
+    notes.extend(f"仍检出限制字样：{term}（请结合其所在段落判断）"
+                 for term in forbidden if term in candidate)
+    notes.extend(_project_term_issues(candidate, settings))
+    return list(dict.fromkeys(notes))
 
 
 def locate_evidence_quote(text: str, quote: str) -> str | None:

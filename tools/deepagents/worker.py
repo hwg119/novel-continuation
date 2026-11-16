@@ -123,12 +123,14 @@ def build_agent(model, system_prompt, call, callback=None):
     def propose_action(tool_name:Literal['plan','plan_revision','generate','consistency','revise','illustration','blueprint','view','navigate'], chapter:int, requirements:str='', target_artifact_id:str|None=None,
                        selection_reason:str='', source_request_turn:str|None=None,
                        revision_scope:Literal['local','structural','regenerate']='local',
+                       generation_mode:Literal['new','regenerate']='new',
                        blueprint_mode:Literal['create','adjust','regenerate']|None=None,
                        navigation:list[str]|None=None) -> dict:
-        """提出操作而非直接执行。plan=从零构建；plan_revision=修改已有分幕，其中 revision_scope=local 是局部修补，structural 是保留正文事实但放弃旧幕结构，regenerate 是完全重新规划；generate=续写；consistency=审校保存正文；revise=修改正文；illustration=生成插图；blueprint=故事蓝图，必须指定 blueprint_mode：create 建立首版、adjust 增量调整、regenerate 保留正文事实与锁定项但重新设计其余结构；view=查看正文；navigate=页面导航。修改已有分幕选 plan_revision 并给 plan 对象 ID；修改正文选 revise 并给 text 对象 ID。用户明确要求执行才调用，讨论不要调用。"""
+        """提出操作而非直接执行。plan=从零构建；plan_revision=修改已有分幕，其中 revision_scope=local 是局部修补，structural 是保留正文事实但放弃旧幕结构，regenerate 是完全重新规划；generate=创作正文，首次续写用 generation_mode=new，已有正文但用户明确要求完全重新写、从零重写或不沿用旧稿时必须用 generation_mode=regenerate，不能改用 revise；revise=以某份现有正文为基底修改；consistency=审校保存正文；illustration=生成插图；blueprint=故事蓝图，必须指定 blueprint_mode；view=查看正文；navigate=页面导航。修改已有分幕选 plan_revision 并给 plan 对象 ID；修改正文选 revise 并给 text 对象 ID。用户明确要求执行才调用，讨论不要调用。"""
         result=call('propose',{'tool':tool_name,'chapter':chapter,'requirements':requirements,
             'target_artifact_id':target_artifact_id,'artifact_selection_reason':selection_reason,
             'source_request_turn':source_request_turn,'revision_scope':revision_scope,
+            'generation_mode':generation_mode,
             'blueprint_mode':blueprint_mode,
             'navigation':navigation or []})
         if isinstance(result,dict) and result.get('error'):

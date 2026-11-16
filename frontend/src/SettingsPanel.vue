@@ -283,7 +283,8 @@ onMounted(() => { void load() })
       <label>系统提示词<textarea v-model="settings.system_prompt" rows="5"></textarea></label>
       <label>术语表（每行 中文=英文；前缀 ! 为硬约束）<textarea v-model="glossaryText" rows="7"></textarea></label>
       <label>禁用词（逗号分隔）<input :value="(settings.forbidden_words || []).join('，')" @input="settings.forbidden_words = ($event.target as HTMLInputElement).value.split(/[,，]/).map(s => s.trim()).filter(Boolean)"></label>
-      <div class="inline-fields"><label>每幕字数<input v-model.number="settings.chars_per_beat" type="number"></label><label>默认温度<input v-model.number="settings.temperature" type="number" step="0.1"></label></div>
+      <label>章节生成方式<select v-model="settings.chapter_generation_mode"><option value="natural_chapter">自然整章（推荐）</option><option value="legacy_beats">逐幕生成（兼容模式）</option></select></label>
+      <div class="inline-fields"><label>篇幅基数<input v-model.number="settings.chars_per_beat" type="number" title="自然整章模式按规划规模估算总篇幅；兼容模式表示每幕字数"></label><label>默认温度<input v-model.number="settings.temperature" type="number" step="0.1"></label></div>
       <div class="inline-fields"><label>检索条数<input v-model.number="settings.retrieval_k_for_continuation" type="number"></label><label>摘要字数<input v-model.number="settings.summary_chars" type="number"></label></div>
       <label class="check"><input v-model="settings.retrieval_in_continuation" type="checkbox">续写时检索母本</label>
       <label class="check"><input v-model="settings.corpus_is_english" type="checkbox">母本是英文</label>

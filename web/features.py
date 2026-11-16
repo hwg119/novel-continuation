@@ -65,6 +65,7 @@ class GenerateRequest(BaseModel):
     title: str = ""
     beats_limit: int | None = None
     overwrite: bool = False
+    regenerate_from_scratch: bool = False
     requirements: str = ""
 
 
@@ -935,14 +936,23 @@ def register_features(app: FastAPI, workspace_root: str,
         from core.draft_review import save_review_session
         path = project_path(project_id)
         settings = settings_for_chapter(load_project_settings(path), payload.number)
+        if payload.regenerate_from_scratch:
+            # A full regeneration may keep the chapter's high-level direction,
+            # but must not inherit accumulated revision instructions as a
+            # scene-by-scene reconstruction recipe.
+            settings['chapter_requirements'] = ''
+            settings['_regenerate_from_scratch'] = True
         beats = settings.get("beats") or []
         if payload.requirements.strip():
             settings['chapter_requirements'] = (str(settings.get('chapter_requirements') or '')
                                                 + '\n' + payload.requirements.strip()).strip()
         if payload.beats_limit:
             beats = beats[:payload.beats_limit]
+        if not beats and str(settings.get("chapter_brief") or "").strip():
+            beats = [{"num": "", "name": "本章主线",
+                      "desc": str(settings.get("chapter_brief") or "").strip()}]
         if not beats:
-            raise HTTPException(400, "请先设置分幕大纲")
+            raise HTTPException(400, "请先填写本章目标或生成章节规划")
         chapter_file = Path(chapter_path(path, payload.number))
         if chapter_file.exists() and not payload.overwrite:
             raise HTTPException(409, "章节已存在；如需重新生成，请明确允许覆盖")
@@ -1232,15 +1242,19 @@ def register_features(app: FastAPI, workspace_root: str,
         previous_context = ""
         if payload.number > 1:
             previous_number = payload.number - 1
-            summary = read_chapter_summary(path, previous_number) or ""
             previous_file = Path(chapter_path(path, previous_number))
             previous_text = previous_file.read_text(encoding="utf-8") if previous_file.is_file() else ""
             tail = previous_text[-3500:].strip()
             blocks = []
-            if summary:
-                blocks.append("【有效摘要】\n" + summary)
+            # A character's latest durable state may have been established two
+            # or three chapters earlier and omitted from the immediate previous
+            # chapter.  Recent summaries are compact enough to carry together.
+            for historical_number in range(max(1, payload.number - 3), payload.number):
+                summary = read_chapter_summary(path, historical_number) or ""
+                if summary:
+                    blocks.append(f"【有效摘要·第{historical_number}章】\n" + summary)
             if tail:
-                blocks.append("【章末原文（时间晚于本章前部内容）】\n" + tail)
+                blocks.append(f"【章末原文·第{previous_number}章（紧邻本章）】\n" + tail)
             previous_context = "\n\n".join(blocks)
         if not payload.model_name:
             raise HTTPException(400, "故事审校需要选择大模型")
@@ -1252,9 +1266,12 @@ def register_features(app: FastAPI, workspace_root: str,
                                   payload.number, secrets=(model_cfg.get("api_key", ""),))
             update("已创建完整审校日志", {"log_path": str(audit.path)})
             update("正在整理上一章与补充证据")
+            # Use both ends: chapter endings often switch to another character
+            # line whose historical state is absent from the opening scene.
+            audit_query = (text[:900] + "\n" + text[-900:]).strip()
             retrieved = retrieve_context_for_beat(
-                path, embedding, text[:200], int(embedding.get("retrieval_k", 4) or 4),
-                glossary=settings.get("glossary") or {}, source_query=text[:200],
+                path, embedding, audit_query, int(embedding.get("retrieval_k", 4) or 4),
+                glossary=settings.get("glossary") or {}, source_query=audit_query,
                 corpus_is_english=bool(settings.get("corpus_is_english")),
                 glossary_hard_terms=settings.get("glossary_hard_terms") or [])
             update("正在进行故事审校：主线逻辑与可选情节增强")
@@ -1678,8 +1695,12 @@ def register_features(app: FastAPI, workspace_root: str,
         'plan': lambda project, data: suggest_plan(project, chat_request(data)),
         'plan_revision': lambda project, data: revise_plan(project, chat_request(data)),
         'generate': lambda project, data: generate(project, GenerateRequest(
-            number=data['chapter'], model_name=data['model_name'], overwrite=False,
-            requirements=data.get('requirements', ''))),
+            number=data['chapter'], model_name=data['model_name'],
+            overwrite=data.get('generation_mode') == 'regenerate',
+            regenerate_from_scratch=data.get('generation_mode') == 'regenerate',
+            requirements=(data.get('original_user_request', '')
+                          if data.get('generation_mode') == 'regenerate'
+                          else data.get('requirements', '')))),
         'consistency': lambda project, data: consistency(project, chat_request(data)),
         'revise': lambda project, data: revise(project, chat_request(data)),
         'illustration': chat_illustration,
