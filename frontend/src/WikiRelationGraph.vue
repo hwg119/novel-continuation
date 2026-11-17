@@ -3,7 +3,7 @@ import type { Core, ElementDefinition, EventObject } from 'cytoscape'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type GraphNode = { id: string; label: string; degree: number }
-type GraphEdge = { id: string; source: string; target: string; count: number }
+type GraphEdge = { id: string; source: string; target: string; count: number; predicates?: string[]; records?: { source: string; target: string; role_direction_verified?: boolean; direction_from?: string; direction_to?: string }[] }
 
 const props = defineProps<{
   nodes: GraphNode[]
@@ -34,16 +34,23 @@ function elements(): ElementDefinition[] {
         size: Math.min(58, 31 + Math.sqrt(Math.max(1, node.degree)) * 3.1),
       },
     })),
-    ...props.edges.map(edge => ({
+    ...props.edges.map(edge => {
+      const records = edge.records || []
+      const forward = records.some(record => record.role_direction_verified && record.direction_from === edge.source && record.direction_to === edge.target)
+      const backward = records.some(record => record.role_direction_verified && record.direction_from === edge.target && record.direction_to === edge.source)
+      return {
       group: 'edges' as const,
       data: {
         id: edge.id,
         source: edge.source,
         target: edge.target,
         count: edge.count,
+        relationLabel: (edge.predicates || []).slice(0, 2).join(' / ') || '有关联',
+        sourceArrow: backward ? 'triangle' : 'none',
+        targetArrow: forward ? 'triangle' : 'none',
         weight: Math.min(7, 1.1 + Math.sqrt(Math.max(1, edge.count))),
       },
-    })),
+    }}),
   ]
 }
 
@@ -97,18 +104,25 @@ async function renderGraph() {
       } },
       { selector: 'edge', style: {
         width: 'data(weight)', 'line-color': '#a8bdb1', 'curve-style': 'bezier',
-        opacity: 0.72, 'overlay-opacity': 0,
+        'source-arrow-shape': ele => ele.data('sourceArrow') === 'triangle' ? 'triangle' : 'none',
+        'target-arrow-shape': ele => ele.data('targetArrow') === 'triangle' ? 'triangle' : 'none',
+        'source-arrow-color': '#789989', 'target-arrow-color': '#789989', 'arrow-scale': 1.25,
+        opacity: 0.72, 'overlay-opacity': 0, label: '',
+        color: '#52766a', 'font-family': 'Microsoft YaHei, sans-serif', 'font-size': 9,
+        'text-background-color': '#f5faf7', 'text-background-opacity': 0.9,
+        'text-background-padding': '2px', 'text-rotation': 'autorotate',
       } },
       { selector: 'node:selected', style: {
         'background-color': '#e2efe7', 'border-color': '#2f6d56', 'border-width': 4,
       } },
       { selector: 'edge:selected', style: { 'line-color': '#30725a', opacity: 1 } },
       { selector: '.is-neighbour', style: { opacity: 1 } },
+      { selector: 'edge.is-neighbour', style: { label: 'data(relationLabel)' } },
       { selector: 'node.is-active', style: {
         'background-color': '#315f50', 'border-color': '#214b3e', 'border-width': 4,
         color: '#fff', 'z-index': 10,
       } },
-      { selector: 'edge.is-active', style: { 'line-color': '#1f6a50', opacity: 1, 'z-index': 9 } },
+      { selector: 'edge.is-active', style: { 'line-color': '#1f6a50', 'source-arrow-color': '#1f6a50', 'target-arrow-color': '#1f6a50', opacity: 1, 'z-index': 9, label: 'data(relationLabel)' } },
       { selector: '.is-muted', style: { opacity: 0.1 } },
     ],
   })

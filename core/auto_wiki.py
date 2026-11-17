@@ -315,7 +315,9 @@ def extract_chapter_facts(project_dir: str, number: int, llm, progress=None, aud
         _emit_progress(progress, f"第 {number} 章片段 {index}/{len(chunks)}")
         prompt = f"""从下面的小说原文中提取能影响后续续写的稳定事实。
 只依据所给文本，不调用你已知的书外知识；不把猜测、比喻或人物谎言当作确定事实。
-优先提取人物关系与称谓、物品状态、时间地点、已发生的重要事件和未解决线索。
+优先提取会影响后续续写的人物关系、物品状态、时间地点、已发生的重要事件和未解决线索。
+人物关系只提取原文明确确认且可能跨章节持续的关系（如亲属、师生、长期盟友或宿敌）；
+一次同场、交谈、称呼、协作、冲突、观察或单次帮助不要写成稳定关系，必要时写 event/state。
 只保留可能影响后续续写的事实；普通天气、瞬时语气、无剧情后果的日常动作不要提取。
 输出 JSON 数组，每项包含 subject、predicate、value、quote、kind、target、story_time、stable_category 八个字符串。
 kind 只能是 stable（较稳定设定）、state（年龄、位置、持有物、伤势等当时状态）、event（一次性经历）、relationship（人物间关系）。
@@ -473,7 +475,108 @@ def build_wiki(project_dir: str, llm, start: int, end: int, progress=None, audit
     result = {"chapters": completed, "facts": count}
     if blocked:
         result["skipped_sensitive"] = blocked
+    if completed or (start is not None and end is not None):
+        result["relationship_curation"] = curate_relationships(project_dir, llm, progress, audit, start=start, end=end)
     return result
+
+
+def curate_relationships(project_dir: str, llm, progress=None, audit=None,
+                         start: int | None = None, end: int | None = None,
+                         force: bool = False) -> dict:
+    """Accumulate relationship changes chapter by chapter with model review."""
+    from core.utils import save_data_to_json
+    from core.story_state import load_relationship_seeds
+    path = Path(project_dir) / "wiki" / "relationships_curated.json"
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    if not isinstance(saved, list):
+        saved = []
+    staging_path = path.with_name("relationships_curated.rebuild.json") if force else path
+    if force and start is not None:
+        end = max(end or 0, *(int(row.get("chapter") or 0) for row in saved), 0)
+        saved = [row for row in saved if int(row.get("chapter") or 0) < start
+                 or row.get("source") == "user_confirmed"]
+    chapters = sorted({int(row.get("chapter") or 0) for row in _valid_facts(project_dir, end + 1 if end else None)
+                       if row.get("kind") == "relationship" and row.get("chapter")
+                       and (start is None or int(row["chapter"]) >= start)
+                       and (end is None or int(row["chapter"]) <= end)})
+    if force:
+        chapters = [number for number, _, _ in list_chapter_files(project_dir)
+                    if (start is None or number >= start) and (end is None or number <= end)
+                    and (Path(project_dir) / "wiki" / "chapters" / f"chapter_{number}.json").is_file()]
+    covered = {int(row.get("chapter") or 0) for row in saved if row.get("source") == "model_curated"}
+    curated = list(saved)
+    failed = []
+    for chapter in chapters:
+        if chapter in covered:
+            continue
+        current = {(row["subject"], row["target"]): row for row in load_relationship_seeds(project_dir)}
+        for row in curated:
+            if row.get("confidence") == "confirmed" and int(row.get("chapter") or 0) < chapter:
+                current[(row["subject"], row["target"])] = row
+        raw = [row for row in _valid_facts(project_dir, chapter + 1)
+               if row.get("kind") == "relationship" and int(row.get("chapter") or 0) == chapter]
+        chapter_text = read_file(chapter_path(project_dir, chapter)).strip()
+        if not raw and not chapter_text:
+            continue
+        prompt = ("你是小说人物关系编辑。根据上一章已确认关系与本章原文线索，输出本章真正发生的关系变化。"
+                  "不要把一次性互动当长期关系。保留有价值的推断为 tentative。关系变化用 changed，结束用 ended。"
+                  "relation 必须是简短的关系称谓，如父亲、妹妹、朋友、同学、同事、师生、敌人；不得写动作、态度、心理或完整句子。"
+                  "动作和关系变化的解释写进 reason，原文依据写进 evidence；无法概括为关系称谓时不要输出。"
+                  "evidence 必须摘取本章正文中连续出现的短句，不得改写。"
+                  "情绪反应、称呼、单次互动不能推出亲属或恋爱关系；没有持续关系的证据就返回空数组。"
+                  "仅输出 JSON 数组，每项含 subject,target,relation,evidence,reason,confidence,status；"
+                  "confidence 为 confirmed 或 tentative；status 为 added、changed 或 ended。\n"
+                  f"上一章关系：{json.dumps(list(current.values())[-45:], ensure_ascii=False)[:6500]}\n"
+                  f"本章线索：{json.dumps(raw, ensure_ascii=False)[:10000]}\n"
+                  f"本章正文：{chapter_text[:24000]}")
+        _emit_progress(progress, f"正在整理第 {chapter} 章人物关系")
+        try:
+            parsed = _extract_json(llm.complete(prompt, disable_thinking=True, num_predict=3200))
+        except (ValueError, json.JSONDecodeError) as error:
+            if audit:
+                audit.write("relationship_chapter_parse_failed", chapter=chapter, error=str(error))
+            _emit_progress(progress, f"第 {chapter} 章关系整理未完成，已保留此前结果")
+            failed.append(chapter)
+            break  # 后续章节依赖本章状态，不能跳过后继续推断。
+        updates = []
+        for item in parsed if isinstance(parsed, list) else []:
+            if not isinstance(item, dict):
+                continue
+            subject, target, relation = (str(item.get(key) or "").strip() for key in ("subject", "target", "relation"))
+            if not subject or not target or not relation or subject == target:
+                continue
+            status = item.get("status") if item.get("status") in {"added", "changed", "ended"} else "added"
+            evidence = str(item.get("evidence") or "").strip()
+            confidence = "confirmed" if item.get("confidence") == "confirmed" else "tentative"
+            if confidence == "confirmed" and (not evidence or evidence not in chapter_text):
+                confidence = "tentative"
+            row = {"subject": subject, "target": target, "predicate": relation, "value": relation,
+                   "quote": evidence, "reason": str(item.get("reason") or ""),
+                   "confidence": confidence,
+                   "status": status, "source": "model_curated", "chapter": chapter}
+            updates.append(row)
+            if row["confidence"] == "confirmed":
+                current.pop((subject, target), None)
+                if status != "ended":
+                    current[(subject, target)] = row
+        curated.extend(updates)
+        save_data_to_json(curated, str(staging_path))
+    if force and not failed:
+        save_data_to_json(curated, str(path))
+        staging_path.unlink(missing_ok=True)
+    if audit:
+        audit.write("relationships_curated", chapters=len(chapters), curated=len(curated))
+    identity_review = None
+    if not failed:
+        from core.wiki_identity import review_identities
+        try:
+            identity_review = review_identities(project_dir, llm, progress)
+        except Exception as error:
+            if audit:
+                audit.write("identity_review_failed", error_type=type(error).__name__, error=str(error))
+            _emit_progress(progress, "人物身份整理暂未完成，可在关系图中继续")
+    return {"status": "partial" if failed else "completed", "relations": len(curated),
+            "failed_chapters": failed, "identity_review": identity_review}
 
 
 def wiki_pending_chapters(project_dir: str) -> list[dict]:
@@ -550,6 +653,8 @@ def build_pending_wiki(project_dir: str, llm, progress=None, audit=None,
               "remaining": len(wiki_pending_chapters(project_dir))}
     if skipped:
         result["skipped_sensitive"] = skipped
+    if completed or (start is not None and end is not None):
+        result["relationship_curation"] = curate_relationships(project_dir, llm, progress, audit, start=start, end=end)
     return result
 
 

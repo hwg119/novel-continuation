@@ -30,32 +30,32 @@ def main():
     with tempfile.TemporaryDirectory(prefix='novel_deepagents_') as tmp:
         path=Path(tmp)
         save_project_settings(tmp,{'chapter_number':208,'chapter_title':'袖扣与回信',
-            'beats':[{'name':'旧幕','desc':'已保存的旧版本，哈利调查袖扣。'}]})
+            'beats':[{'name':'旧幕','desc':'已保存的旧版本，主角调查袖扣。'}]})
         records={}
         class Jobs:
             def get(self,path,ident): return records.get(ident)
         store=ChatStore(path/'chat.db')
-        cases=[('同名标题选择','继续修改《痕与树影》的最后一版：补清金妮向哈利传递信息。'),
+        cases=[('同名标题选择','继续修改《案卷与回信》的最后一版：补清配角传递信息。'),
                ('接续澄清','最后一版'),
                ('查阅后修订','先读当前候选，再修正第五幕提前使用第六幕才取得的碎纸片，不改其他幕。')]
         for name,text in cases:
             session=store.create('trial',208); ids=[]
-            for i,title in enumerate(('墨痕与树影','墨痕与树影','袖扣与回信')):
+            for i,title in enumerate(('案卷与回信','案卷与回信','袖扣与回信')):
                 action=store.action(session,{'tool':'plan','chapter':208}); ids.append(action)
                 store.action_status(session,action,'started',action)
-                beats=[{'name':'第五幕','desc':'哈利开始比对碎纸片上的笔迹。'},
-                       {'name':'第六幕','desc':'哈利首次在门缝下捡到碎纸片。'}] if i==1 else [{'name':'旧幕','desc':'旧版本调查路线。'}]
+                beats=[{'name':'第五幕','desc':'主角开始比对碎纸片上的笔迹。'},
+                       {'name':'第六幕','desc':'主角首次在门缝下捡到碎纸片。'}] if i==1 else [{'name':'旧幕','desc':'旧版本调查路线。'}]
                 records[action]={'id':action,'status':'completed','created_at':f'2026-10-11 19:{i:02d}:00',
                     'result':{'chapter_title':title,'beats':beats}}
             backend=ChatArtifacts(store,Jobs(),tmp,session)
-            backend.select(backend.resolve(208,ids[1],'plan'),'当前讨论的是墨痕与树影的最新候选')
+            backend.select(backend.resolve(208,ids[1],'plan'),'当前讨论的是案卷与回信的最新候选')
             context={**backend.context(208),'current_chapter':208,'conversation':[], 'recent_user_requests':[]}
             previous=None
             if name=='接续澄清':
-                previous=store.begin(session,'使用《墨痕与树影》这版，补清金妮向哈利传递信息。',208)
+                previous=store.begin(session,'使用《案卷与回信》这版，补清配角传递信息。',208)
                 store.finish(session,previous,'done')
                 context['recent_user_requests']=[{'turn_id':previous,'chapter':208,
-                    'text':'使用《墨痕与树影》这版，补清金妮向哈利传递信息。','already_proposed':False}]
+                    'text':'使用《案卷与回信》这版，补清配角传递信息。','already_proposed':False}]
                 context['conversation']=[{'role':'user','data':context['recent_user_requests'][0]},
                     {'role':'assistant','data':{'text':'这个标题有两个版本，你要哪一版？'}}]
             events=[];started=time.monotonic()

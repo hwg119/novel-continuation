@@ -201,12 +201,11 @@ async function buildRange() {
   if (start.value < 1 || end.value < start.value) { error.value = '请输入有效的章节范围。'; return }
   const rangePending = pending.value.filter(item => item.chapter >= start.value && item.chapter <= end.value && item.reason !== 'sensitive')
   const count = forceRange.value ? end.value - start.value + 1 : rangePending.length
-  if (!forceRange.value && !count) { error.value = '所选范围内没有待更新章节。'; return }
   const confirmed = await askConfirm({
-    title: forceRange.value ? `强制重建第 ${start.value}～${end.value} 章 Wiki？` : `更新范围内 ${count} 章 Wiki？`,
+    title: forceRange.value ? `强制重建第 ${start.value}～${end.value} 章 Wiki？` : `更新第 ${start.value}～${end.value} 章？`,
     message: forceRange.value
       ? '范围内已有缓存也会被模型重新编纂并覆盖。耗时和调用成本取决于实际存在的章节数量。'
-      : '只处理该范围内新增、正文变化或缓存版本过旧的章节；其余章节不会调用模型。',
+      : `${count} 章 Wiki 需要更新；随后整理该范围的人物关系。已有 Wiki 缓存会保留。`,
     symbol: forceRange.value ? '重' : '辑',
     confirmLabel: forceRange.value ? '确认强制重建' : '开始分批更新',
     modelName: props.modelName,
@@ -225,7 +224,7 @@ async function buildRange() {
         if (job.status === 'running') { setTimeout(poll, 2500); return }
         busy.value = false
         if (job.status !== 'completed') { error.value = job.message; return }
-        feedback.value = `Wiki 已更新：${job.result?.chapters || 0} 章、${job.result?.facts || 0} 条可溯源事实。`
+        feedback.value = `Wiki 已更新 ${job.result?.chapters || 0} 章；人物关系整理结果可在任务控制台查看。`
         if (project === props.projectId) { await Promise.all([load(), loadPending()]); await loadEntity(); await loadProfile() }
       } catch (cause) { busy.value = false; error.value = String(cause) }
     }
@@ -272,7 +271,7 @@ onMounted(() => { if (props.currentChapter) end.value = props.currentChapter; re
   </section>
   <section class="panel wiki-advanced">
     <button class="wiki-advanced-toggle" :aria-expanded="advancedOpen" @click="advancedOpen = !advancedOpen"><span><small>高级操作</small><strong>分批处理与范围重建</strong></span><b>{{ advancedOpen ? '收起' : '展开' }} {{ advancedOpen ? '↑' : '↓' }}</b></button>
-    <div v-if="advancedOpen" class="wiki-advanced-body"><p>首次编纂可先选少量章节验证效果；日常维护优先使用上方的一键更新。</p><div class="inline-fields"><label>起始章<input v-model.number="start" type="number" min="1"></label><label>结束章<input v-model.number="end" type="number" min="1"></label><button :disabled="busy || !projectId || !modelName" @click="buildRange">{{ busy ? '处理中…' : forceRange ? '强制重建此范围' : '分批更新此范围' }}</button></div><label class="wiki-force-option"><input v-model="forceRange" type="checkbox"><span><strong>强制重建此范围</strong><small>忽略已有缓存，重新调用模型并覆盖对应章节的 Wiki。</small></span></label></div>
+    <div v-if="advancedOpen" class="wiki-advanced-body"><p>按所选范围更新需要处理的章节，并整理人物关系；已有 Wiki 无变化时直接整理关系。</p><div class="inline-fields"><label>起始章<input v-model.number="start" type="number" min="1"></label><label>结束章<input v-model.number="end" type="number" min="1"></label><button :disabled="busy || !projectId || !modelName" @click="buildRange">{{ busy ? '处理中…' : '更新此范围' }}</button></div><label class="wiki-force-option"><input v-model="forceRange" type="checkbox"><span><strong>强制重建 Wiki 事实</strong><small>忽略已有缓存，重新调用模型并覆盖对应章节的 Wiki。</small></span></label></div>
   </section>
   <section class="panel wiki-library"><div class="wiki-library-tools"><label>查找人物、地点或物品<input v-model="query" placeholder="输入实体名称" @input="load"></label><label>只看截至第几章<input v-model.number="asOf" type="number" min="1" placeholder="全部章节"></label></div><div class="wiki-grid"><nav class="wiki-index" aria-label="Wiki 条目"><button v-for="item in subjects" :key="item.subject" :class="{ chosen: selected === item.subject }" @click="selected = item.subject">{{ item.subject }} <small>{{ item.facts.length }}</small></button><p v-if="!subjects.length">尚无 Wiki 内容。先选择章节范围开始编纂。</p></nav>
     <div v-if="entity" class="wiki-entity"><div class="wiki-entity-head"><span class="eyebrow">人物与世界档案</span><h2>{{ entity.subject }}</h2><p>{{ entity.facts_count }} 条可核对记录{{ asOf ? ` · 截至第 ${asOf} 章` : '' }}</p></div><aside class="wiki-evidence-note"><strong>这里记录原文曾经写过什么</strong><span>状态和关系可能被后文改变；判断续写时的当前情况，应以最近章节为准。</span></aside>

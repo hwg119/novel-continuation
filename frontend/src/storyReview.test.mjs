@@ -27,6 +27,15 @@ test('empty or outdated selections do not manufacture requirements', () => {
   assert.equal(importStoryRequirements('', [], ['E01']), '')
 })
 
+test('only checked audit reminders enter a conditional revision request', () => {
+  const chosen = '人物关系待核对：本章写到两个妹妹。'
+  const result = importStoryRequirements('', [], [], '审校报告', [chosen])
+  assert.match(result, /已选择的待核对提醒/)
+  assert.match(result, /本章写到两个妹妹/)
+  assert.match(result, /证据不足时保持原文/)
+  assert.doesNotMatch(result, /完整审校报告/)
+})
+
 test('full report remains importable when no explicit requirement was extracted', () => {
   const result = importStoryRequirements('', [], [], '连续性成立，但请再次核对称谓。')
   assert.match(result, /完整审校报告/)

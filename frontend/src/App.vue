@@ -630,7 +630,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onKeydown)
   <ProjectsPanel v-else-if="activeTab === 'projects'" :project-id="projectId" :project-name="project?.name || ''" @changed="loadProjects()" @task="taskStarted" />
   <QualityPanel v-else-if="activeTab === 'quality'" :project-id="projectId" :chapter-number="chapterNumber" :model-name="modelName" :text="text" :revision="revision" :dirty="dirty" @task="taskStarted" @apply="applyRevision" />
   <WikiPanel v-else-if="activeTab === 'wiki'" :project-id="projectId" :model-name="modelName" :models="models" :current-chapter="chapterNumber" :focus-subject="wikiFocusSubject" @task="taskStarted" @open-chapter="openWikiChapter" @open-graph="activeTab = 'relationships'" @updated="wikiPendingCount = $event" />
-  <RelationGraphPanel v-else-if="activeTab === 'relationships'" :project-id="projectId" :current-chapter="chapterNumber" @back="activeTab = 'wiki'" @open-chapter="openWikiChapter" @open-subject="wikiFocusSubject = $event; activeTab = 'wiki'" />
+  <RelationGraphPanel v-else-if="activeTab === 'relationships'" :project-id="projectId" :current-chapter="chapterNumber" :model-name="modelName" @task="taskStarted" @back="activeTab = 'wiki'" @open-chapter="openWikiChapter" @open-subject="wikiFocusSubject = $event; activeTab = 'wiki'" />
   <RunsPanel v-else-if="activeTab === 'runs'" :project-id="projectId" :focus-job="focusJob" />
   <DeveloperPanel v-else-if="activeTab === 'developer'" :project-id="projectId" />
   <ConfigPanel v-else :key="activeTab" @changed="loadConfig" />

@@ -80,6 +80,7 @@ class ChapterRequest(BaseModel):
     revision: str = ""
     preview: dict = {}
     revision_mode: Literal["local", "whole", "polish"] = "local"
+    revision_baseline: Literal["current", "latest_candidate"] = "current"
     plan_revision_scope: Literal["local", "structural", "regenerate"] = "local"
 
 
@@ -1138,7 +1139,7 @@ def register_features(app: FastAPI, workspace_root: str,
                     or str(chosen.get('original_source') or '').strip() != original_source.strip()):
                 raise HTTPException(409, '选定候选对应的正文已变化，请重新核对工作对象')
             source = chosen['text']
-        elif not payload.text or source.strip() == original_source.strip():
+        elif payload.revision_baseline == "latest_candidate" and (not payload.text or source.strip() == original_source.strip()):
             from web.revision_baseline import latest_candidate
             baseline_job = latest_candidate(path, payload.number, original_source)
             if baseline_job:
@@ -1453,15 +1454,72 @@ def register_features(app: FastAPI, workspace_root: str,
 
     @app.get("/api/projects/{project_id}/wiki/relationships")
     def wiki_relationships(project_id: str, start_chapter: int | None = None,
-                           end_chapter: int | None = None):
-        from core.auto_wiki import wiki_relationship_graph
+                            end_chapter: int | None = None, view: str = "history"):
+        from core.auto_wiki import _entity_aliases, wiki_relationship_graph
         if start_chapter is not None and start_chapter < 1:
             raise HTTPException(400, "起始章必须大于零")
         if end_chapter is not None and end_chapter < 1:
             raise HTTPException(400, "结束章必须大于零")
         if start_chapter and end_chapter and start_chapter > end_chapter:
             raise HTTPException(400, "章节范围无效")
-        return wiki_relationship_graph(project_path(project_id), start_chapter, end_chapter)
+        if view == "merged":
+            from core.story_state import merged_relationship_graph
+            result = merged_relationship_graph(project_path(project_id), end_chapter + 1 if end_chapter else None)
+        else:
+            result = wiki_relationship_graph(project_path(project_id), start_chapter, end_chapter)
+        _, canonical_aliases = _entity_aliases(project_path(project_id))
+        for alias, canonical in result.pop("name_aliases", {}).items():
+            canonical_aliases.setdefault(canonical, set()).add(alias)
+        result["aliases"] = {canonical: sorted(values) for canonical, values in canonical_aliases.items()}
+        return result
+
+    @app.post("/api/projects/{project_id}/wiki/relationships/candidates/{index}/confirm", dependencies=[Depends(_write_required)])
+    def confirm_wiki_relationship(project_id: str, index: int):
+        from core.story_state import confirm_relationship_candidate
+        try:
+            return confirm_relationship_candidate(project_path(project_id), index)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+
+    @app.get("/api/projects/{project_id}/wiki/identities")
+    def wiki_identity_status(project_id: str):
+        from core.wiki_identity import identity_status
+        return identity_status(project_path(project_id))
+
+    @app.post("/api/projects/{project_id}/wiki/identities/review", dependencies=[Depends(_write_required)])
+    def review_wiki_identities(project_id: str, payload: dict):
+        from core.continuation import ContinuationLLM
+        from core.wiki_identity import review_identities
+        path = project_path(project_id)
+        model_cfg = llm(str(payload.get("model_name") or ""))
+        def work(update, job_id):
+            return review_identities(path, ContinuationLLM(model_cfg),
+                                     progress=lambda message: update(message))
+        return jobs.start(path, "wiki_identity", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/wiki/identities/decide", dependencies=[Depends(_write_required)])
+    def decide_wiki_identity(project_id: str, payload: dict):
+        from core.wiki_identity import decide_identity
+        try:
+            return decide_identity(project_path(project_id), str(payload.get("left") or ""),
+                                   str(payload.get("right") or ""), str(payload.get("status") or ""))
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+
+    @app.post("/api/projects/{project_id}/wiki/relationships/review-person", dependencies=[Depends(_write_required)])
+    def review_person_relationships(project_id: str, payload: dict):
+        from core.continuation import ContinuationLLM
+        from core.wiki_relation_resolution import review_character_relationships
+        path = project_path(project_id)
+        subject = str(payload.get("subject") or "").strip()
+        if not subject:
+            raise HTTPException(400, "请先选择人物")
+        model_cfg = llm(str(payload.get("model_name") or ""))
+        def work(update, job_id):
+            return review_character_relationships(path, subject, ContinuationLLM(model_cfg),
+                                                  progress=lambda message: update(message),
+                                                  through_chapter=int(payload.get("through_chapter") or 0) or None)
+        return jobs.start(path, "wiki_relationship_review", work, pass_job_id=True)
 
     @app.get("/api/projects/{project_id}/wiki/subjects/{subject}")
     def wiki_subject(project_id: str, subject: str, before_chapter: int | None = None):
@@ -1585,7 +1643,7 @@ def register_features(app: FastAPI, workspace_root: str,
         pending = [item for item in wiki_pending_chapters(path)
                    if (start is None or item["chapter"] >= start)
                    and (end is None or item["chapter"] <= end)]
-        if not force and not pending:
+        if not force and not pending and (start is None or end is None):
             message = "所选范围内没有待处理章节" if start is not None or end is not None else "Wiki 已是最新，无待处理章节"
             raise HTTPException(400, message)
         model_cfg = llm(str(payload.get("model_name") or ""))
@@ -1602,6 +1660,22 @@ def register_features(app: FastAPI, workspace_root: str,
             except Exception as exc:
                 audit.write("run_failed", error_type=type(exc).__name__, error=str(exc))
                 raise
+        return jobs.start(path, "wiki", work, pass_job_id=True)
+
+    @app.post("/api/projects/{project_id}/wiki/relationships/rebuild", dependencies=[Depends(_write_required)])
+    def rebuild_wiki_relationships(project_id: str, payload: dict):
+        from core.auto_wiki import curate_relationships
+        from core.continuation import ContinuationLLM
+        path = project_path(project_id)
+        start, end = int(payload.get("start") or 1), int(payload.get("end") or 0)
+        if start < 1 or end < start:
+            raise HTTPException(400, "章号范围无效")
+        model_cfg = llm(str(payload.get("model_name") or ""))
+        def work(update, job_id):
+            result = curate_relationships(path, ContinuationLLM(model_cfg),
+                                          progress=lambda message, data=None: update(message, data),
+                                          start=start, end=end, force=True)
+            return result
         return jobs.start(path, "wiki", work, pass_job_id=True)
 
     @app.post("/api/projects/{project_id}/wiki/chapters/{number}/retry", dependencies=[Depends(_write_required)])

@@ -18,6 +18,7 @@ const props = defineProps<{ projectId: string; chapterNumber: number | null;
 const emit = defineEmits<{ task: [id: string]; apply: [text: string] }>()
 const requirements = ref('')
 const revisionMode = ref('local')
+const revisionBaseline = ref<'current' | 'latest_candidate'>('current')
 const polishing = computed(() => revisionMode.value === 'polish')
 function revisionModeChanged() { if (polishing.value) requirements.value = '' }
 const suggestion = ref('')
@@ -25,6 +26,10 @@ const sourceAtStart = ref('')
 const report = ref('')
 const auditRequirements = ref('')
 const auditNotes = ref<string[]>([])
+const selectedAuditNotes = ref<string[]>([])
+const relationAuditNotes = computed(() => auditNotes.value.filter(note => note.startsWith('人物关系待核对：')))
+const otherAuditNotes = computed(() => auditNotes.value.filter(note => !note.startsWith('人物关系待核对：')))
+function auditNoteTitle(note: string) { return note.split('｜', 1)[0].replace(/^人物关系待核对：/, '').slice(0, 72) }
 const enhancements = ref<StoryEnhancement[]>([])
 const selectedEnhancements = ref<string[]>([])
 const auditKind = ref('story')
@@ -33,9 +38,9 @@ const storyDetails = ref<string | null | undefined>(undefined)
 const auditDisplay = computed(() => storyAuditDisplay(
   auditKind.value, storySummary.value, report.value, storyDetails.value))
 const importRequirements = computed(() => importStoryRequirements(
-  auditRequirements.value, enhancements.value, selectedEnhancements.value, report.value))
+  auditRequirements.value, enhancements.value, selectedEnhancements.value, report.value, selectedAuditNotes.value))
 const hasActionableAudit = computed(() => !!importStoryRequirements(
-  auditRequirements.value, enhancements.value, selectedEnhancements.value))
+  auditRequirements.value, enhancements.value, selectedEnhancements.value, '', selectedAuditNotes.value))
 const issues = ref<string[]>([])
 const error = ref('')
 const feedback = ref('')
@@ -112,6 +117,7 @@ function restoreAudit(id: string) {
   report.value = audit.report || ''
   auditRequirements.value = audit.revision_requirements || ''
   auditNotes.value = audit.audit_notes || []
+  selectedAuditNotes.value = []
   enhancements.value = audit.story_enhancements || []
   selectedEnhancements.value = []
   auditKind.value = audit.audit_kind || 'consistency'
@@ -143,15 +149,16 @@ async function loadAudits(selectId = '') {
 }
 
 function payload() { return { number: props.chapterNumber, model_name: props.modelName,
-  text: props.text, revision: props.revision, requirements: requirements.value, revision_mode: revisionMode.value } }
+  text: props.text, revision: props.revision, requirements: requirements.value,
+  revision_mode: revisionMode.value, revision_baseline: revisionBaseline.value } }
 function suggestionEdited() { issues.value = []; error.value = '' }
 function useAuditRequirements() {
   const currentReport = importRequirements.value
   if (!currentReport || running.value) return
   revisionMode.value = 'local'
   requirements.value = currentReport
-  feedback.value = auditRequirements.value.trim() || selectedEnhancements.value.length
-    ? '已覆盖导入主线修订与选中的情节增强；未选中的意见和待核对提醒未带入。'
+  feedback.value = auditRequirements.value.trim() || selectedEnhancements.value.length || selectedAuditNotes.value.length
+    ? '已覆盖导入主线修订及选中项目；未选中的待核对提醒未带入。'
     : '本次没有明确修订项，已导入完整审校报告供模型重新核对；没有可确认的问题时应保持原文。'
 }
 async function pollJob(id: string, done: (job: Job) => void) {
@@ -178,6 +185,7 @@ async function aiCheck() {
       report.value = String(job.result?.report || '')
       auditRequirements.value = String(job.result?.revision_requirements || '')
       auditNotes.value = (job.result?.audit_notes || []) as string[]
+      selectedAuditNotes.value = []
       enhancements.value = (job.result?.story_enhancements || []) as StoryEnhancement[]
       selectedEnhancements.value = []; auditKind.value = String(job.result?.audit_kind || 'story')
       storySummary.value = String(job.result?.story_summary || '')
@@ -206,15 +214,16 @@ async function revise() {
 async function apply() {
   if (!suggestion.value) return
   if (props.text !== sourceAtStart.value) { error.value = '正文在生成建议后发生变化，请重新生成建议。'; return }
-  if (issues.value.length && !await askConfirm({ title: '仍有验收提醒，确认应用？',
-    message: '模型提醒可能包含误判。请先核对下方提醒；确认后仅填入正文编辑器，不直接保存章节。',
-    symbol: '核', confirmLabel: '已核对，应用修订稿' })) return
+  let checkedIssues: string[]
   try {
     const checked = await api<{ issues: string[] }>(`/api/projects/${props.projectId}/revise/check`,
       writeOptions('POST', { ...payload(), preview: { candidate: suggestion.value } }))
-    issues.value = checked.issues
-    if (issues.value.length) { error.value = '当前建议稿未通过应用前校验，请修改后再试。'; return }
+    checkedIssues = checked.issues
+    issues.value = checkedIssues
   } catch (cause) { error.value = String(cause); return }
+  if (checkedIssues.length && !await askConfirm({ title: `仍有 ${checkedIssues.length} 条验收提醒，确认应用？`,
+    message: `${checkedIssues.join('；').slice(0, 600)}\n\n确认后只填入正文编辑器，不直接保存章节。`,
+    symbol: '核', confirmLabel: '已核对，应用修订稿' })) return
   const title = props.text.split(/\r?\n/, 1)[0] || `第${props.chapterNumber}章`
   emit('apply', `${title}\n\n${suggestion.value.trim()}\n`)
   feedback.value = '修订稿已应用到正文编辑器，尚未保存；现在可点击故事审校检查修订后的全文。请记得保存章节。'
@@ -222,7 +231,8 @@ async function apply() {
 watch(selectedDraft, value => { if (value) restoreDraft(value) })
 watch(selectedAudit, value => { if (value) restoreAudit(value) })
 watch(() => [props.projectId, props.chapterNumber], () => {
-  suggestion.value = ''; report.value = ''; auditRequirements.value = ''; auditNotes.value = []; issues.value = []; showAllDiff.value = false
+  revisionBaseline.value = 'current'
+  suggestion.value = ''; report.value = ''; auditRequirements.value = ''; auditNotes.value = []; selectedAuditNotes.value = []; issues.value = []; showAllDiff.value = false
   drafts.value = []; selectedDraft.value = ''; audits.value = []; selectedAudit.value = ''
   enhancements.value = []; selectedEnhancements.value = []; auditKind.value = 'story'
   storySummary.value = ''
@@ -238,7 +248,7 @@ watch(() => [props.projectId, props.chapterNumber], () => {
     <label v-if="audits.length" class="revision-history-picker">历史故事审校<select v-model="selectedAudit">
       <option v-for="audit in audits" :key="audit.id" :value="audit.id">{{ audit.created_at }}{{ audit.audit_kind !== 'story' ? ' · 旧版一致性记录' : '' }} · 上一章 {{ audit.previous_context_chars }} 字 · Wiki {{ audit.wiki_chars }} 字</option>
     </select></label>
-    <template v-if="report"><p v-if="auditDisplay.summary" class="story-summary">{{ auditDisplay.summary }}</p><h3>{{ auditKind === 'story' ? '主线修订' : '旧版修改要求' }}</h3><pre v-if="auditRequirements" class="report">{{ auditRequirements }}</pre><p v-else class="muted-note">{{ auditKind === 'story' ? '本轮未发现有充分依据的重大主线问题，不代表全文没有细节错误。' : '旧记录没有可导入的简短要求，可重新进行故事审校。' }}</p>
+    <template v-if="report"><p v-if="auditDisplay.summary" class="story-summary">{{ auditDisplay.summary }}</p><section v-if="relationAuditNotes.length" class="relationship-audit-alert"><h3>人物关系待核对 · {{ relationAuditNotes.length }} 项</h3><p>勾选后可导入修订要求；模型会先核实，证据不足时保持原文。</p><article v-for="note in relationAuditNotes" :key="note" class="audit-note-choice"><label><input v-model="selectedAuditNotes" type="checkbox" :value="note" :disabled="running"> 纳入修订核对</label><details><summary>{{ auditNoteTitle(note) }} · 展开依据</summary><p>{{ note }}</p></details></article></section><h3>{{ auditKind === 'story' ? '主线修订' : '旧版修改要求' }}</h3><pre v-if="auditRequirements" class="report">{{ auditRequirements }}</pre><p v-else class="muted-note">{{ auditKind === 'story' ? '本轮未发现有充分依据的重大主线问题，不代表全文没有细节错误。' : '旧记录没有可导入的简短要求，可重新进行故事审校。' }}</p>
     <div class="story-enhancements"><header><h3>情节增强</h3><span>可选 · 默认不执行</span></header>
       <p v-if="!enhancements.length" class="muted-note">{{ auditKind === 'story' ? '本轮没有提出可选增强，不为扩写而扩写。' : '旧版记录不包含情节增强，重新审校后可查看。' }}</p>
       <article v-for="item in enhancements" :key="item.id" class="story-enhancement" :class="{ selected: selectedEnhancements.includes(item.id) }">
@@ -247,10 +257,10 @@ watch(() => [props.projectId, props.chapterNumber], () => {
         <details><summary>查看对应原文</summary><blockquote v-for="(cite, index) in item.citations" :key="index">{{ cite.quote }}</blockquote></details>
       </article>
     </div>
-    <details v-if="auditNotes.length"><summary>待核对提醒（{{ auditNotes.length }} 项，不自动修订）</summary><ul><li v-for="(note, index) in auditNotes" :key="index">{{ note }}</li></ul></details><details v-if="auditDisplay.details"><summary>查看详细审校依据</summary><pre class="report">{{ auditDisplay.details }}</pre></details></template></section>
-    <section class="panel"><h2>修订</h2><label>修订方式<select v-model="revisionMode" :disabled="running" @change="revisionModeChanged"><option value="local">局部修补（推荐）</option><option value="whole">整章重写 · 情节或风格大调整</option><option value="polish">表达润色 · 去 AI 味（可选）</option></select></label>
+    <details v-if="otherAuditNotes.length"><summary>其他待核对提醒（{{ otherAuditNotes.length }} 项）</summary><article v-for="note in otherAuditNotes" :key="note" class="audit-note-choice"><label><input v-model="selectedAuditNotes" type="checkbox" :value="note" :disabled="running"> 纳入修订核对</label><details><summary>{{ auditNoteTitle(note) }} · 展开依据</summary><p>{{ note }}</p></details></article></details><details v-if="auditDisplay.details"><summary>查看详细审校依据</summary><pre class="report">{{ auditDisplay.details }}</pre></details></template></section>
+    <section class="panel"><h2>修订</h2><label>修订方式<select v-model="revisionMode" :disabled="running" @change="revisionModeChanged"><option value="local">局部修补（推荐）</option><option value="whole">整章重写 · 情节或风格大调整</option><option value="polish">表达润色 · 去 AI 味（可选）</option></select></label><label>修订基准<select v-model="revisionBaseline" :disabled="running"><option value="current">当前正文（推荐）</option><option value="latest_candidate">上一份未应用候选稿</option></select></label>
       <button type="button" class="subtle" :disabled="running || !importRequirements" :title="hasActionableAudit ? '导入主线修订与勾选的情节增强，覆盖输入框已有内容' : '导入完整报告重新复核；没有可确认的问题时保持原文'" @click="useAuditRequirements">{{ hasActionableAudit ? '一键导入修订要求' : '根据完整报告重新复核' }}</button>
-      <p class="muted-note">{{ polishing ? '只润色当前正文的表达，不改变剧情。修订稿须先应用到正文编辑器才能继续润色；不会自动追加模型调用。' : hasActionableAudit ? '仅导入主线要求与勾选的增强意见；需要增删段落或重构场景时，选择整章重写。' : '本次审校没有明确修订项；重新复核只生成候选稿，没有可确认的问题时应保持原文。' }}</p>
+      <p class="muted-note">{{ polishing ? '只润色当前正文的表达，不改变剧情。修订稿须先应用到正文编辑器才能继续润色；不会自动追加模型调用。' : hasActionableAudit ? '导入主线要求与勾选的增强、提醒；提醒须先核实，证据不足时保持原文。需要重构场景时选择整章重写。' : '本次审校没有明确修订项；重新复核只生成候选稿，没有可确认的问题时应保持原文。' }}</p>
       <label>{{ polishing ? '额外表达偏好（可不填）' : '修订要求' }}<textarea v-model="requirements" rows="7" :placeholder="polishing ? '例如保留含蓄口吻，减少重复解释；不填写则按润色 Skill 执行。' : '简短说明改什么、保留什么；一键导入会覆盖已有内容。'"></textarea></label>
       <button :disabled="!chapterNumber || !modelName || running || (!polishing && !requirements.trim())" @click="revise">{{ running ? '处理中…' : polishing ? '执行表达润色' : '执行修订' }}</button>
       <label v-if="drafts.length" class="revision-history-picker">历史修订建议<select v-model="selectedDraft">
@@ -259,13 +269,13 @@ watch(() => [props.projectId, props.chapterNumber], () => {
       <div v-if="suggestion" class="revision-apply-state" :class="draftState"><span aria-hidden="true"></span><div><strong>{{ draftStateLabel }}</strong>
         <small v-if="draftState === 'pending'">返回正文页检查后，点击“保存正文”才会写入章节文件。</small>
         <small v-else-if="draftState === 'saved'">当前章节文件与这份修订建议一致。</small>
-        <small v-else-if="draftState === 'outdated'">生成建议后正文已发生变化，只可比较，不能直接覆盖。</small>
+        <small v-else-if="draftState === 'outdated'">这份建议所依据的文本与当前正文不同。可查看对照；如要应用，请以当前正文重新生成。</small>
         <small v-else-if="draftState === 'edited'">当前建议与历史记录不同，应用后将采用这里的编辑版本。</small>
         <small v-else>这份建议尚未进入正文编辑器。</small></div></div>
       <p v-if="issues.length" class="issue-list">{{ issues.join('；') }}</p>
       <div v-if="suggestion"><label>建议稿（可修改）<textarea v-model="suggestion" rows="16" @input="suggestionEdited"></textarea></label>
         <button class="subtle" @click="showDiff = !showDiff">{{ showDiff ? '隐藏对照' : '查看原文对照' }}</button>
-        <button :disabled="running || draftState === 'saved' || draftState === 'pending' || draftState === 'outdated'" @click="apply">{{ draftState === 'saved' ? '已保存到正文' : draftState === 'pending' ? '已应用，等待保存' : issues.length ? '核对提醒后应用' : '应用到正文编辑器' }}</button></div></section></div>
+        <button v-if="draftState === 'outdated'" :disabled="running || !requirements.trim()" @click="revisionBaseline = 'current'; revise()">基于当前正文重新生成</button><button :disabled="running || draftState === 'saved' || draftState === 'pending' || draftState === 'outdated'" @click="apply">{{ draftState === 'saved' ? '已保存到正文' : draftState === 'pending' ? '已应用，等待保存' : issues.length ? '核对提醒后应用' : '应用到正文编辑器' }}</button></div></section></div>
   <section v-if="showDiff && suggestion" class="quality-diff"><div class="quality-diff-head"><div><span class="eyebrow">文字校样</span><h2>当前正文 → 修订建议</h2></div>
     <div><span>{{ changeCount }} 处变动</span><label class="check"><input v-model="showAllDiff" type="checkbox">显示全部未改内容</label></div></div>
     <div class="revision-comparison quality-diff-grid"><div class="revision-column-head"><i class="diff-key removed-key"></i>当前正文</div><div class="revision-column-head"><i class="diff-key added-key"></i>修订建议</div>
@@ -276,3 +286,15 @@ watch(() => [props.projectId, props.chapterNumber], () => {
       </template>
     </div></section>
 </div></template>
+<style scoped>
+.relationship-audit-alert{margin:18px 0;padding:16px 18px;border:1px solid #d7ad74;border-left:5px solid #ad7540;border-radius:8px;background:#fff7eb;color:#513b2b}
+.relationship-audit-alert h3{margin:0 0 8px;color:#704522}
+.relationship-audit-alert p{margin:0 0 10px}
+.relationship-audit-alert ul{margin:0;padding-left:22px}
+.relationship-audit-alert li+li{margin-top:8px}
+.audit-note-choice{margin-top:10px;padding:10px 12px;border:1px solid #dec9a9;border-radius:6px;background:#fffdf8}
+.audit-note-choice label{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
+.audit-note-choice details{margin-top:6px}
+.audit-note-choice summary{cursor:pointer}
+.audit-note-choice p{margin:8px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+</style>

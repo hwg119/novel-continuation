@@ -136,8 +136,7 @@ def _revision_source(text: str, requirements: str, rebuild: bool) -> str:
 def explicit_checks(requirements: str) -> tuple[list[str], list[str]]:
     """仅抽取能够安全按全文执行的字面要求。
 
-    ``校园段不得出现哈利`` 这类约束有明确局部作用域，不能降格成
-    “全文禁用哈利”，尤其当同一要求又明确保留含该人物的前半段时。
+    局部段落约束有明确作用域，不能降格成“全文禁用某个词”，尤其当同一要求又明确保留含该词的前半段时。
     局部、条件式和叙事语义约束由模型验收处理；这里只保留独立禁令及
     明写“全文/整章/全篇”的禁令，供确定性的最终应用检查使用。
     """

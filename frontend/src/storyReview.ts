@@ -28,12 +28,15 @@ export function storyAuditDisplay(kind: string, summary: string, report: string,
 }
 
 // 只导入用户选中的增强，未选中意见和待核对提醒不成为修订要求。
-export function importStoryRequirements(main: string, enhancements: StoryEnhancement[], selected: string[], report = '') {
+export function importStoryRequirements(main: string, enhancements: StoryEnhancement[], selected: string[], report = '', selectedNotes: string[] = []) {
   const chosen = enhancements.filter(item => selected.includes(item.id))
-  if (!chosen.length && !main.trim() && report.trim()) return `【完整审校报告（未提取出明确修订项）】\n${report.trim()}`
-  if (!chosen.length) return main.trim()
+  const notes = [...new Set(selectedNotes.map(note => note.trim()).filter(Boolean))]
+  if (!chosen.length && !notes.length && !main.trim() && report.trim()) return `【完整审校报告（未提取出明确修订项）】\n${report.trim()}`
+  if (!chosen.length && !notes.length) return main.trim()
   const sections = main.trim() ? [`【主线修订】\n${main.trim()}`] : []
-  sections.push('【已选择的情节增强】\n' + chosen.map((item, i) =>
+  if (notes.length) sections.push('【已选择的待核对提醒】\n请先根据正文和已确认资料核实；证据不足时保持原文，确有问题时才作最小修改，不补造人物或关系。\n' +
+    notes.map((note, i) => `${i + 1}. ${note}`).join('\n'))
+  if (chosen.length) sections.push('【已选择的情节增强】\n' + chosen.map((item, i) =>
     `${i + 1}. ${item.scope}：${item.suggestion}\n保留：${item.preserve}`).join('\n'))
   return sections.join('\n\n')
 }
